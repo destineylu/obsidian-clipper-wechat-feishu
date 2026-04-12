@@ -1,62 +1,74 @@
-# Obsidian Web Clipper (Chinese Content Enhanced)
+# Obsidian Web Clipper（中文内容增强版）
 
-> This is a fork of the official [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper), enhanced for Chinese content platforms.
+> 基于官方 [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper) Fork，专门为中文内容平台增强。
 
-[中文说明](./README_CN.md)
+[English](./README_EN.md)
 
-## What's different from the official version?
+## 与官方版本有什么不同？
 
-This fork adds **Bilibili video support** in Reader Mode, bringing the same experience as the official YouTube integration:
+本 Fork 在 Reader Mode 中增加了 **Bilibili 视频支持**，体验与官方的 YouTube 集成保持一致：
 
-- **Content extraction** — Extracts video description, chapters, and subtitles/transcript from Bilibili pages
-- **Video embed** — Embeds Bilibili player in Reader Mode with sticky pin-player support
-- **Clickable timestamps** — Click any subtitle or chapter timestamp to seek the video
-- **Auto-scroll** — Automatically scrolls the transcript to follow playback
-- **Highlight active line** — Highlights the current subtitle line during playback
-- **Cross-browser support** — Works on Chrome and Firefox with proper `Referer` header handling
+- **内容提取** — 从 Bilibili 视频页面提取视频简介、章节和字幕
+- **视频嵌入** — 在 Reader Mode 中嵌入 Bilibili 播放器，支持置顶固定
+- **时间戳点击跳转** — 点击任意字幕或章节的时间戳，视频跳转到对应时间
+- **自动滚动** — 播放过程中自动滚动字幕，跟随播放进度
+- **高亮当前行** — 播放时高亮显示当前字幕行
+- **跨浏览器支持** — 支持 Chrome 和 Firefox，自动处理 `Referer` 请求头
 
-### Why not merged upstream?
+### 为什么没有合并到官方项目？
 
-The official maintainer [indicated](https://github.com/obsidianmd/obsidian-clipper/pull/1) that site-specific content extractors should be implemented in [Defuddle](https://github.com/kepano/defuddle) (the content extraction library), not in the Web Clipper extension itself. Since integrating Bilibili support into Defuddle would require a different architectural approach, this fork maintains the feature independently for users who need it now.
+官方维护者[指出](https://github.com/obsidianmd/obsidian-clipper/pull/1)，针对特定网站的内容提取器应该在 [Defuddle](https://github.com/kepano/defuddle)（内容提取库）中实现，而不是在 Web Clipper 扩展本身。由于将 Bilibili 支持集成到 Defuddle 需要不同的架构方案，本 Fork 独立维护此功能，方便有需要的用户直接使用。
 
-## Get started
+## 快速开始
 
-### Build from source
+### 从源码构建
 
-```
+```bash
 npm install
 npm run build
 ```
 
-### Install the extension locally
+构建产物：
+- `dist/` — Chromium 版本
+- `dist_firefox/` — Firefox 版本
+- `dist_safari/` — Safari 版本
 
-For Chromium browsers (Chrome, Brave, Edge, Arc):
+### 本地安装扩展
 
-1. Open your browser and navigate to `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked** and select the `dist` directory
+**Chromium 浏览器**（Chrome、Brave、Edge、Arc）：
 
-For Firefox:
+1. 打开浏览器访问 `chrome://extensions`
+2. 开启 **开发者模式**
+3. 点击 **加载已解压的扩展程序**，选择 `dist` 目录
 
-1. Open Firefox and navigate to `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on**
-3. Navigate to the `dist_firefox` directory and select the `manifest.json` file
+**Firefox**：
 
-## Official resources
+1. 打开 Firefox 访问 `about:debugging#/runtime/this-firefox`
+2. 点击 **临时载入附加组件**
+3. 进入 `dist_firefox` 目录，选择 `manifest.json` 文件
 
-- **[Download Official Web Clipper](https://obsidian.md/clipper)**
-- **[Documentation](https://help.obsidian.md/web-clipper)**
-- **[Troubleshooting](https://help.obsidian.md/web-clipper/troubleshoot)**
+如需在 Firefox 中永久安装，可使用 Nightly 或 Developer 版本：
 
-## Third-party libraries
+1. 地址栏输入 `about:config`
+2. 搜索 `xpinstall.signatures.required`
+3. 双击将其设为 `false`
+4. 前往 `about:addons` > 齿轮图标 > **从文件安装附加组件…**
 
-- [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) for browser compatibility
-- [defuddle](https://github.com/kepano/defuddle) for content extraction and Markdown conversion
-- [dayjs](https://github.com/iamkun/dayjs) for date parsing and formatting
-- [lz-string](https://github.com/pieroxy/lz-string) to compress templates to reduce storage space
-- [lucide](https://github.com/lucide-icons/lucide) for icons
-- [dompurify](https://github.com/cure53/DOMPurify) for sanitizing HTML
+## 官方资源
 
-## License
+- **[下载官方 Web Clipper](https://obsidian.md/clipper)**
+- **[官方文档](https://help.obsidian.md/web-clipper)**
+- **[问题排查](https://help.obsidian.md/web-clipper/troubleshoot)**
 
-MIT — Same as the [original project](https://github.com/obsidianmd/obsidian-clipper).
+## 第三方库
+
+- [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) — 浏览器兼容
+- [defuddle](https://github.com/kepano/defuddle) — 内容提取与 Markdown 转换
+- [dayjs](https://github.com/iamkun/dayjs) — 日期解析与格式化
+- [lz-string](https://github.com/pieroxy/lz-string) — 模板压缩
+- [lucide](https://github.com/lucide-icons/lucide) — 图标
+- [dompurify](https://github.com/cure53/DOMPurify) — HTML 净化
+
+## 许可证
+
+MIT — 与[原项目](https://github.com/obsidianmd/obsidian-clipper)一致。
