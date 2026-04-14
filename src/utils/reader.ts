@@ -10,6 +10,7 @@ import { copyToClipboard } from './clipboard-utils';
 import { getMessage, initializeI18n } from './i18n';
 import { getFontCss } from './font-utils';
 import { extractBilibiliStructuredContent, isBilibiliVideoUrl } from './bilibili-extractor';
+import { createBilibiliPlaybackTracker } from './bilibili-playback-tracker';
 
 // Mobile viewport settings
 const VIEWPORT = 'width=device-width, initial-scale=1, maximum-scale=1';
@@ -1792,12 +1793,14 @@ export class Reader {
 	 * 初始化 Bilibili 字幕交互功能：
 	 * 点击跳转、基于计时器的播放追踪、自动滚动、高亮当前行。
 	 *
-	 * Bilibili 的嵌入播放器没有 postMessage API，
-	 * 因此使用系统时钟估算当前播放进度来驱动 auto-scroll 和 highlight。
+	 * 优先复用 reader 内的原生 video 元素（与 YouTube 的原生视频模式一致），
+	 * 直接读取 paused/currentTime 驱动字幕；仅在没有原生 video 时，
+	 * 才回退到 iframe 消息 + 系统时间估算的兼容方案。
 	 */
 	private static initializeBilibiliTimestamps(doc: Document) {
+		const nativeVideo = doc.querySelector('video.reader-video-player') as HTMLVideoElement | null;
 		const iframe = doc.querySelector('iframe[src*="player.bilibili.com"]') as HTMLIFrameElement | null;
-		if (!iframe) return;
+		if (!iframe && !nativeVideo) return;
 
 		const transcriptSection = doc.querySelector('.bilibili-transcript') as HTMLElement | null;
 		const chaptersSection = doc.querySelector('.bilibili-chapters') as HTMLElement | null;
@@ -1821,36 +1824,53 @@ export class Reader {
 		if (cues.length === 0 && chapterItems.length === 0) return;
 
 		// --- 计时器播放追踪 ---
-		let playbackOriginSystem = Date.now();
-		let playbackOriginVideo = 0;
-		let tracking = false;
+		let initialVideoTime = nativeVideo ? nativeVideo.currentTime : 0;
 
-		try {
-			const url = new URL(iframe.src);
-			playbackOriginVideo = parseInt(url.searchParams.get('t') || '0', 10);
-		} catch {}
-
-		const startTracking = (videoTime: number) => {
-			playbackOriginVideo = videoTime;
-			playbackOriginSystem = Date.now();
-			tracking = true;
-		};
-
-		const getEstimatedTime = (): number => {
-			if (!tracking) return playbackOriginVideo;
-			return playbackOriginVideo + (Date.now() - playbackOriginSystem) / 1000;
-		};
-
-		// iframe 加载完成后开始追踪
-		iframe.addEventListener('load', () => {
+		if (iframe) {
 			try {
 				const url = new URL(iframe.src);
-				const t = parseInt(url.searchParams.get('t') || '0', 10);
-				startTracking(t);
-			} catch {
-				startTracking(0);
+				initialVideoTime = parseInt(url.searchParams.get('t') || '0', 10);
+			} catch {}
+		}
+
+		const playbackTracker = createBilibiliPlaybackTracker(initialVideoTime);
+
+		// iframe 加载完成后开始追踪
+		if (iframe) {
+			iframe.addEventListener('load', () => {
+				try {
+					const url = new URL(iframe.src);
+					const t = parseInt(url.searchParams.get('t') || '0', 10);
+					playbackTracker.startTracking(t);
+				} catch {
+					playbackTracker.startTracking(0);
+				}
+			});
+		}
+
+		const onMessage = (event: MessageEvent) => {
+			if (!iframe) return;
+			const fromIframe = event.source === iframe.contentWindow;
+			let fromBilibiliOrigin = false;
+			try {
+				const eventOriginHost = new URL(event.origin).hostname;
+				fromBilibiliOrigin = eventOriginHost.endsWith('bilibili.com');
+			} catch {}
+			if (!fromIframe && !fromBilibiliOrigin) return;
+			playbackTracker.handlePlayerMessage(event.data);
+		};
+		if (iframe) {
+			window.addEventListener('message', onMessage);
+		}
+
+		const syncPlaybackStateFromMediaSession = () => {
+			const playbackState = (navigator as Navigator & {
+				mediaSession?: { playbackState?: string };
+			}).mediaSession?.playbackState;
+			if (playbackState === 'playing' || playbackState === 'paused' || playbackState === 'none') {
+				playbackTracker.syncPlaybackState(playbackState);
 			}
-		});
+		};
 
 		// --- 活跃段落追踪 ---
 		const AUTO_SCROLL_COOLDOWN = 2000;
@@ -1950,17 +1970,33 @@ export class Reader {
 
 		// 定时轮询更新播放进度（500ms 间隔，与 YouTube 一致）
 		const pollInterval = setInterval(() => {
-			if (!doc.contains(iframe)) {
+			if (nativeVideo && !doc.contains(nativeVideo)) {
 				clearInterval(pollInterval);
 				return;
 			}
-			if (tracking) {
-				updateActiveSegment(getEstimatedTime());
+			if (iframe && !doc.contains(iframe)) {
+				clearInterval(pollInterval);
+				window.removeEventListener('message', onMessage);
+				return;
 			}
+			if (nativeVideo) {
+				playbackTracker.syncPlaybackState(nativeVideo.paused ? 'paused' : 'playing');
+				updateActiveSegment(nativeVideo.currentTime);
+				return;
+			}
+			syncPlaybackStateFromMediaSession();
+			updateActiveSegment(playbackTracker.getEstimatedTime());
 		}, 500);
 
 		// --- 点击跳转 ---
 		const seekBilibili = (seconds: number) => {
+			if (nativeVideo) {
+				nativeVideo.currentTime = seconds;
+				const playPromise = nativeVideo.play();
+				if (playPromise?.catch) playPromise.catch(() => {});
+				return;
+			}
+			if (!iframe) return;
 			const currentSrc = new URL(iframe.src);
 			currentSrc.searchParams.set('t', String(seconds));
 			currentSrc.searchParams.set('autoplay', '1');
@@ -2088,13 +2124,21 @@ export class Reader {
 			let bilibiliPage = '1';
 			let bilibiliTimestamp = 0;
 			let bilibiliThumbnail = '';
+			let bilibiliVideoWasPlaying = false;
+			let bilibiliVideoElement: HTMLVideoElement | null = null;
 			if (isBilibili) {
 				const urlMatch = doc.URL.match(/\/video\/(BV[\w]+|av\d+)/i);
 				if (urlMatch) bilibiliVideoId = urlMatch[1];
 				const pageMatch = doc.URL.match(/[?&]p=(\d+)/);
 				if (pageMatch) bilibiliPage = pageMatch[1];
 				const videoEl = doc.querySelector('video');
-				if (videoEl) bilibiliTimestamp = Math.floor(videoEl.currentTime);
+				if (videoEl) {
+					bilibiliTimestamp = Math.floor(videoEl.currentTime);
+					bilibiliVideoWasPlaying = !videoEl.paused;
+					bilibiliVideoElement = videoEl as HTMLVideoElement;
+					// 复用原生 video 以获取准确 paused/currentTime，避免仅靠系统时间估算。
+					bilibiliVideoElement.remove();
+				}
 				const ogImg = doc.querySelector('meta[property="og:image"]') as HTMLMetaElement;
 				if (ogImg?.content) bilibiliThumbnail = ogImg.content;
 			}
@@ -2500,13 +2544,31 @@ export class Reader {
 						+ '<path d="M45 24L27 14v20" fill="white"/></svg>';
 					playerContainer.appendChild(thumbnail);
 				} else {
-					const iframe = doc.createElement('iframe');
-					iframe.src = embedUrl;
-					iframe.setAttribute('allowfullscreen', '');
-					iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
-					iframe.setAttribute('scrolling', 'no');
-					playerContainer.appendChild(iframe);
-					await browser.runtime.sendMessage({ action: 'enableBilibiliEmbedRule' }).catch(() => {});
+					if (bilibiliVideoElement) {
+						const videoWrapper = doc.createElement('div');
+						videoWrapper.className = 'reader-video-wrapper';
+						bilibiliVideoElement.classList.add('reader-video-player');
+						bilibiliVideoElement.controls = true;
+						videoWrapper.appendChild(bilibiliVideoElement);
+						playerContainer.appendChild(videoWrapper);
+						if (bilibiliTimestamp > 0) {
+							try {
+								bilibiliVideoElement.currentTime = bilibiliTimestamp;
+							} catch {}
+						}
+						if (bilibiliVideoWasPlaying) {
+							const playPromise = bilibiliVideoElement.play();
+							if (playPromise?.catch) playPromise.catch(() => {});
+						}
+					} else {
+						const iframe = doc.createElement('iframe');
+						iframe.src = embedUrl;
+						iframe.setAttribute('allowfullscreen', '');
+						iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+						iframe.setAttribute('scrolling', 'no');
+						playerContainer.appendChild(iframe);
+						await browser.runtime.sendMessage({ action: 'enableBilibiliEmbedRule' }).catch(() => {});
+					}
 				}
 
 				// Toggle bar with pin-player control
