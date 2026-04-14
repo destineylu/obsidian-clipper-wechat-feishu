@@ -54,21 +54,6 @@ npm run build
 3. 双击将其设为 `false`
 4. 前往 `about:addons` > 齿轮图标 > **从文件安装附加组件…**
 
-## 官方资源
-
-- **[下载官方 Web Clipper](https://obsidian.md/clipper)**
-- **[官方文档](https://help.obsidian.md/web-clipper)**
-- **[问题排查](https://help.obsidian.md/web-clipper/troubleshoot)**
-
-## 第三方库
-
-- [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) — 浏览器兼容
-- [defuddle](https://github.com/kepano/defuddle) — 内容提取与 Markdown 转换
-- [dayjs](https://github.com/iamkun/dayjs) — 日期解析与格式化
-- [lz-string](https://github.com/pieroxy/lz-string) — 模板压缩
-- [lucide](https://github.com/lucide-icons/lucide) — 图标
-- [dompurify](https://github.com/cure53/DOMPurify) — HTML 净化
-
 ## 许可证
 
 MIT — 与[原项目](https://github.com/obsidianmd/obsidian-clipper)一致。

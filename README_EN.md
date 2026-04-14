@@ -54,21 +54,6 @@ To install permanently on Firefox Nightly or Developer Edition:
 3. Double-click to set it to `false`
 4. Go to `about:addons` > gear icon > **Install Add-on From File…**
 
-## Official resources
-
-- **[Download Official Web Clipper](https://obsidian.md/clipper)**
-- **[Documentation](https://help.obsidian.md/web-clipper)**
-- **[Troubleshooting](https://help.obsidian.md/web-clipper/troubleshoot)**
-
-## Third-party libraries
-
-- [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) — Browser compatibility
-- [defuddle](https://github.com/kepano/defuddle) — Content extraction and Markdown conversion
-- [dayjs](https://github.com/iamkun/dayjs) — Date parsing and formatting
-- [lz-string](https://github.com/pieroxy/lz-string) — Template compression
-- [lucide](https://github.com/lucide-icons/lucide) — Icons
-- [dompurify](https://github.com/cure53/DOMPurify) — HTML sanitization
-
 ## License
 
 MIT — Same as the [original project](https://github.com/obsidianmd/obsidian-clipper).
