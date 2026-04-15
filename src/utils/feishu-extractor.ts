@@ -126,7 +126,7 @@ export function isFeishuDocUrl(url: string): boolean {
 		const parsed = new URL(url);
 		const isFeishuHost = parsed.hostname.endsWith('.feishu.cn') || parsed.hostname.endsWith('.larksuite.com');
 		if (!isFeishuHost) return false;
-		return /^\/(wiki|docx|doc)\/[\w-]+/.test(parsed.pathname);
+		return /^\/(wiki|docx|docs?)\/[\w-]+/.test(parsed.pathname);
 	} catch {
 		return false;
 	}
@@ -135,10 +135,12 @@ export function isFeishuDocUrl(url: string): boolean {
 export function parseFeishuUrl(url: string): FeishuParsedUrl {
 	try {
 		const parsed = new URL(url);
-		const match = parsed.pathname.match(/^\/(wiki|docx|doc)\/([\w-]+)/);
+		const match = parsed.pathname.match(/^\/(wiki|docx|docs?)\/([\w-]+)/);
 		if (!match) return { type: null, token: null };
+		const rawType = match[1];
+		const normalizedType = (rawType === 'docs' ? 'doc' : rawType) as 'wiki' | 'docx' | 'doc';
 		return {
-			type: match[1] as 'wiki' | 'docx' | 'doc',
+			type: normalizedType,
 			token: match[2],
 		};
 	} catch {
@@ -154,7 +156,9 @@ async function fetchFeishuApi(url: string, options?: { method?: string; body?: s
 	}) as { success?: boolean; data?: any; error?: string };
 
 	if (!response?.success) {
-		throw new Error(response?.error || 'Failed to fetch Feishu API');
+		const errMsg = response?.error || 'Failed to fetch Feishu API';
+		console.warn('[Feishu Clipper] API request failed:', errMsg, 'URL:', url);
+		throw new Error(errMsg);
 	}
 	return response.data;
 }
@@ -163,11 +167,14 @@ async function resolveDocumentId(parsedUrl: FeishuParsedUrl): Promise<{ document
 	if (!parsedUrl.token) return null;
 
 	if (parsedUrl.type === 'wiki') {
-		const nodeData = await fetchFeishuApi(
+		const result = await fetchFeishuApi(
 			`https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${parsedUrl.token}`
 		);
-		const node = nodeData?.data?.node;
-		if (!node?.obj_token) return null;
+		const node = result?.data?.node;
+		if (!node?.obj_token) {
+			console.warn('[Feishu Clipper] Wiki get_node returned no obj_token. Response:', JSON.stringify(result).slice(0, 500));
+			return null;
+		}
 		return { documentId: node.obj_token, objType: node.obj_type || 'docx' };
 	}
 
@@ -504,17 +511,26 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 	if (!isFeishuDocUrl(doc.URL)) return null;
 
 	const parsedUrl = parseFeishuUrl(doc.URL);
-	if (!parsedUrl.token || !parsedUrl.type) return null;
+	if (!parsedUrl.token || !parsedUrl.type) {
+		console.warn('[Feishu Clipper] Failed to parse URL:', doc.URL);
+		return null;
+	}
 
 	const resolved = await resolveDocumentId(parsedUrl);
-	if (!resolved) return null;
+	if (!resolved) {
+		console.warn('[Feishu Clipper] Failed to resolve document ID for token:', parsedUrl.token, 'type:', parsedUrl.type);
+		return null;
+	}
 
 	const [blocks, meta] = await Promise.all([
 		fetchAllBlocks(resolved.documentId),
 		fetchDocumentMeta(resolved.documentId),
 	]);
 
-	if (!blocks.length) return null;
+	if (!blocks.length) {
+		console.warn('[Feishu Clipper] No blocks returned for document:', resolved.documentId);
+		return null;
+	}
 
 	const content = convertBlocksToHtml(blocks);
 	const title = meta?.title || doc.title || '';

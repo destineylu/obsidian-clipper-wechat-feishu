@@ -147,7 +147,7 @@ async function getFeishuTenantToken(): Promise<string> {
 	const data = await browser.storage.local.get('feishu_settings');
 	const settings = data.feishu_settings as { appId?: string; appSecret?: string } | undefined;
 	if (!settings?.appId || !settings?.appSecret) {
-		throw new Error('Feishu App ID and App Secret not configured');
+		throw new Error('Feishu credentials not configured. Go to Obsidian Clipper settings → General → Feishu / Lark to enter your App ID and App Secret.');
 	}
 
 	const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
@@ -157,18 +157,18 @@ async function getFeishuTenantToken(): Promise<string> {
 	});
 
 	if (!response.ok) {
-		throw new Error(`Feishu token request failed with status ${response.status}`);
+		throw new Error(`Feishu token request failed: HTTP ${response.status}. Check your App ID and App Secret.`);
 	}
 
 	const result = await response.json();
 	if (result.code !== 0 || !result.tenant_access_token) {
-		throw new Error(result.msg || 'Failed to get Feishu tenant token');
+		throw new Error(`Feishu token error: ${result.msg || 'unknown'}(code ${result.code}). Verify your App ID and App Secret are correct.`);
 	}
 
 	const expiresIn = (result.expire || 7200) * 1000;
 	feishuTokenCache = {
 		token: result.tenant_access_token,
-		expiresAt: Date.now() + expiresIn - 5 * 60 * 1000, // refresh 5 min early
+		expiresAt: Date.now() + expiresIn - 5 * 60 * 1000,
 	};
 
 	return feishuTokenCache.token;
@@ -194,10 +194,16 @@ async function fetchFeishuApi(url: string, options?: { method?: string; body?: s
 
 	const response = await fetch(url, fetchOptions);
 	if (!response.ok) {
-		throw new Error(`Feishu API failed with status ${response.status}`);
+		throw new Error(`Feishu API HTTP ${response.status}: ${url}`);
 	}
 
-	return response.json();
+	const result = await response.json();
+
+	if (result.code && result.code !== 0) {
+		throw new Error(`Feishu API error ${result.code}: ${result.msg || 'unknown'} (${url})`);
+	}
+
+	return result;
 }
 
 let sidePanelOpenWindows: Set<number> = new Set();
