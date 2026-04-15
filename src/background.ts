@@ -126,6 +126,80 @@ async function fetchBilibiliJson(url: string): Promise<any> {
 	return response.json();
 }
 
+// Feishu API proxy with token management
+let feishuTokenCache: { token: string; expiresAt: number } | null = null;
+
+function isAllowedFeishuFetchUrl(url: string): boolean {
+	try {
+		const parsedUrl = new URL(url);
+		return parsedUrl.protocol === 'https:'
+			&& (parsedUrl.hostname === 'open.feishu.cn' || parsedUrl.hostname === 'open.larksuite.com');
+	} catch {
+		return false;
+	}
+}
+
+async function getFeishuTenantToken(): Promise<string> {
+	if (feishuTokenCache && Date.now() < feishuTokenCache.expiresAt) {
+		return feishuTokenCache.token;
+	}
+
+	const data = await browser.storage.local.get('feishu_settings');
+	const settings = data.feishu_settings as { appId?: string; appSecret?: string } | undefined;
+	if (!settings?.appId || !settings?.appSecret) {
+		throw new Error('Feishu App ID and App Secret not configured');
+	}
+
+	const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json; charset=utf-8' },
+		body: JSON.stringify({ app_id: settings.appId, app_secret: settings.appSecret }),
+	});
+
+	if (!response.ok) {
+		throw new Error(`Feishu token request failed with status ${response.status}`);
+	}
+
+	const result = await response.json();
+	if (result.code !== 0 || !result.tenant_access_token) {
+		throw new Error(result.msg || 'Failed to get Feishu tenant token');
+	}
+
+	const expiresIn = (result.expire || 7200) * 1000;
+	feishuTokenCache = {
+		token: result.tenant_access_token,
+		expiresAt: Date.now() + expiresIn - 5 * 60 * 1000, // refresh 5 min early
+	};
+
+	return feishuTokenCache.token;
+}
+
+async function fetchFeishuApi(url: string, options?: { method?: string; body?: string; headers?: Record<string, string> }): Promise<any> {
+	if (!isAllowedFeishuFetchUrl(url)) {
+		throw new Error('Blocked Feishu fetch URL');
+	}
+
+	const token = await getFeishuTenantToken();
+	const method = options?.method || 'GET';
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${token}`,
+		'Content-Type': 'application/json; charset=utf-8',
+		...options?.headers,
+	};
+
+	const fetchOptions: RequestInit = { method, headers, cache: 'no-store' };
+	if (options?.body && method !== 'GET') {
+		fetchOptions.body = options.body;
+	}
+
+	const response = await fetch(url, fetchOptions);
+	if (!response.ok) {
+		throw new Error(`Feishu API failed with status ${response.status}`);
+	}
+
+	return response.json();
+}
+
 let sidePanelOpenWindows: Set<number> = new Set();
 let highlighterModeState: { [tabId: number]: boolean } = {};
 let readerModeState: { [tabId: number]: boolean } = {};
@@ -347,6 +421,19 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 
 		if (typedRequest.action === 'fetchBilibiliJson' && typedRequest.url) {
 			fetchBilibiliJson(typedRequest.url).then((data) => {
+				sendResponse({ success: true, data });
+			}).catch((error) => {
+				sendResponse({
+					success: false,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			});
+			return true;
+		}
+
+		if (typedRequest.action === 'fetchFeishuApi' && typedRequest.url) {
+			const options = (typedRequest as any).options as { method?: string; body?: string; headers?: Record<string, string> } | undefined;
+			fetchFeishuApi(typedRequest.url, options).then((data) => {
 				sendResponse({ success: true, data });
 			}).catch((error) => {
 				sendResponse({
@@ -670,7 +757,8 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			typedRequest.action === "getHighlighterMode" ||
 			typedRequest.action === "toggleHighlighterMode" ||
 			typedRequest.action === "openObsidianUrl" ||
-			typedRequest.action === 'fetchBilibiliJson') {
+			typedRequest.action === 'fetchBilibiliJson' ||
+			typedRequest.action === 'fetchFeishuApi') {
 			return true;
 		}
 	}

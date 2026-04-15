@@ -9,6 +9,7 @@ import { flattenShadowDom } from './utils/flatten-shadow-dom';
 import { saveFile } from './utils/file-utils';
 import { debugLog } from './utils/debug';
 import { extractBilibiliStructuredContent, isBilibiliVideoUrl } from './utils/bilibili-extractor';
+import { extractFeishuStructuredContent, isFeishuDocUrl } from './utils/feishu-extractor';
 
 declare global {
 	interface Window {
@@ -328,25 +329,31 @@ declare global {
 				);
 				const defuddled = await Promise.race([defuddle.parseAsync(), parseTimeout])
 					.catch(() => defuddle.parse());
-				const bilibiliContent = isBilibiliVideoUrl(document.URL)
-					? await extractBilibiliStructuredContent(document).catch((error) => {
-						console.warn('Failed to extract Bilibili structured content:', error);
-						return null;
-					})
-					: null;
-				const extractedContent: { [key: string]: string } = {
-					...defuddled.variables,
-				};
+			const bilibiliContent = isBilibiliVideoUrl(document.URL)
+				? await extractBilibiliStructuredContent(document).catch((error) => {
+					console.warn('Failed to extract Bilibili structured content:', error);
+					return null;
+				})
+				: null;
+			const feishuContent = isFeishuDocUrl(document.URL)
+				? await extractFeishuStructuredContent(document).catch((error) => {
+					console.warn('Failed to extract Feishu structured content:', error);
+					return null;
+				})
+				: null;
+			const extractedContent: { [key: string]: string } = {
+				...defuddled.variables,
+			};
 
-				if (bilibiliContent) {
-					extractedContent.transcript = bilibiliContent.transcriptMarkdown;
-					extractedContent.transcriptMarkdown = bilibiliContent.transcriptMarkdown;
-					extractedContent.transcriptText = bilibiliContent.transcriptText;
-					extractedContent.chapters = bilibiliContent.chaptersMarkdown;
-					extractedContent.bvid = bilibiliContent.bvid;
-					extractedContent.cid = String(bilibiliContent.cid);
-					extractedContent.page = String(bilibiliContent.page);
-				}
+			if (bilibiliContent) {
+				extractedContent.transcript = bilibiliContent.transcriptMarkdown;
+				extractedContent.transcriptMarkdown = bilibiliContent.transcriptMarkdown;
+				extractedContent.transcriptText = bilibiliContent.transcriptText;
+				extractedContent.chapters = bilibiliContent.chaptersMarkdown;
+				extractedContent.bvid = bilibiliContent.bvid;
+				extractedContent.cid = String(bilibiliContent.cid);
+				extractedContent.page = String(bilibiliContent.page);
+			}
 
 				// Create a new DOMParser
 				const parser = new DOMParser();
@@ -390,26 +397,26 @@ declare global {
 				// Get the modified HTML without scripts, styles, and style attributes
 				const cleanedHtml = doc.documentElement.outerHTML;
 
-				const response: ContentResponse = {
-					author: bilibiliContent?.author || defuddled.author,
-					content: bilibiliContent?.structuredHtml || defuddled.content,
-					description: bilibiliContent?.description || defuddled.description,
-					domain: getDomain(document.URL),
-					extractedContent: extractedContent,
-					favicon: defuddled.favicon,
-					fullHtml: cleanedHtml,
-					highlights: highlighter.getHighlights(),
-					image: bilibiliContent?.image || defuddled.image,
-					language: defuddled.language || '',
-					parseTime: defuddled.parseTime,
-					published: bilibiliContent?.published || defuddled.published,
-					schemaOrgData: defuddled.schemaOrgData,
-					selectedHtml: selectedHtml,
-					site: bilibiliContent ? 'Bilibili' : defuddled.site,
-					title: bilibiliContent?.title || defuddled.title,
-					wordCount: bilibiliContent?.wordCount || defuddled.wordCount,
-					metaTags: defuddled.metaTags || []
-				};
+			const response: ContentResponse = {
+				author: bilibiliContent?.author || feishuContent?.author || defuddled.author,
+				content: bilibiliContent?.structuredHtml || feishuContent?.content || defuddled.content,
+				description: bilibiliContent?.description || defuddled.description,
+				domain: getDomain(document.URL),
+				extractedContent: extractedContent,
+				favicon: defuddled.favicon,
+				fullHtml: cleanedHtml,
+				highlights: highlighter.getHighlights(),
+				image: bilibiliContent?.image || defuddled.image,
+				language: defuddled.language || '',
+				parseTime: defuddled.parseTime,
+				published: bilibiliContent?.published || defuddled.published,
+				schemaOrgData: defuddled.schemaOrgData,
+				selectedHtml: selectedHtml,
+				site: bilibiliContent ? 'Bilibili' : feishuContent ? 'Feishu' : defuddled.site,
+				title: bilibiliContent?.title || feishuContent?.title || defuddled.title,
+				wordCount: bilibiliContent?.wordCount || feishuContent?.wordCount || defuddled.wordCount,
+				metaTags: defuddled.metaTags || []
+			};
 				sendResponse(response);
 			}).catch((error: unknown) => {
 				console.error('[Obsidian Clipper] getPageContent error:', error);
