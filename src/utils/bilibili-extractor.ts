@@ -230,7 +230,7 @@ export function buildBilibiliStructuredHtml(input: {
 		sections.push('<ol>');
 		input.chapters.forEach((chapter) => {
 			sections.push(
-				`<li><span class="bilibili-timestamp" data-time="${Math.floor(chapter.from)}">${formatBilibiliTimestamp(chapter.from)}</span><span class="bilibili-chapter-title">${escapeHtml(chapter.title)}</span></li>`
+				`<li><span class="bilibili-timestamp" data-time="${Math.floor(chapter.from)}">${formatBilibiliTimestamp(chapter.from)}</span> <span class="bilibili-chapter-title">${escapeHtml(chapter.title)}</span></li>`
 			);
 		});
 		sections.push('</ol>');
@@ -249,7 +249,7 @@ export function buildBilibiliStructuredHtml(input: {
 			sections.push('<ul>');
 			group.lines.forEach((cue) => {
 				sections.push(
-					`<li><span class="bilibili-timestamp" data-time="${Math.floor(cue.from)}">${formatBilibiliTimestamp(cue.from)}</span><span class="bilibili-transcript-text">${escapeHtml(cue.content)}</span></li>`
+					`<li><span class="bilibili-timestamp" data-time="${Math.floor(cue.from)}">${formatBilibiliTimestamp(cue.from)}</span> <span class="bilibili-transcript-text">${escapeHtml(cue.content)}</span></li>`
 				);
 			});
 			sections.push('</ul>');
