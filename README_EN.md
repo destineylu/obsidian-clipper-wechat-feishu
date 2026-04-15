@@ -6,7 +6,11 @@
 
 ## What's different from the official version?
 
-This fork adds **Bilibili video support** in Reader Mode, bringing the same experience as the official YouTube integration:
+This fork adds enhanced support for Chinese content platforms:
+
+### Bilibili video support
+
+Adds **Bilibili video support** in Reader Mode, bringing the same experience as the official YouTube integration:
 
 - **Content extraction** — Extracts video description, chapters, and subtitles/transcript from Bilibili pages
 - **Video embed** — Embeds Bilibili player in Reader Mode with sticky pin-player support
@@ -14,6 +18,23 @@ This fork adds **Bilibili video support** in Reader Mode, bringing the same expe
 - **Auto-scroll** — Automatically scrolls the transcript to follow playback
 - **Highlight active line** — Highlights the current subtitle line during playback
 - **Cross-browser support** — Works on Chrome and Firefox with proper `Referer` header handling
+
+### Feishu document full extraction
+
+The official version extracts Feishu document content via generic DOM parsing, which often returns incomplete results due to Feishu's dynamic rendering. This fork integrates the **Feishu Open Platform API** to fetch document content through structured endpoints:
+
+- **Complete content** — Retrieves all document blocks including text, headings, lists, code blocks, tables, quotes, and more
+- **Wiki support** — Works with both Feishu Wiki (`/wiki/`) and regular document (`/docx/`) URLs
+- **Structure preserved** — Maintains the original document hierarchy, converted to standard HTML for Obsidian Clipper to process
+
+**Setup:**
+
+1. Go to [Feishu Open Platform](https://open.feishu.cn/app) and create a custom app
+2. Grant the app these permissions: `docx:document:readonly`, `wiki:node:read`
+3. Get the App ID and App Secret (see [official docs: Get access token](https://open.feishu.cn/document/server-docs/api-call-guide/calling-process/get-access-token#63c75bdc))
+4. Open Obsidian Web Clipper → click **Settings** (top-right) → **General** → find the **Feishu / Lark** section → enter your App ID and App Secret
+
+> **Privacy note**: App ID and App Secret are stored only in your local browser storage (`browser.storage.local`) and are never sent to any third-party server.
 
 ### Why not merged upstream?
 
