@@ -71,6 +71,10 @@ Adds **Bilibili video support** in Reader Mode, bringing the same experience as 
 
 The official maintainer [indicated](https://github.com/obsidianmd/obsidian-clipper/pull/1) that site-specific content extractors should be implemented in [Defuddle](https://github.com/kepano/defuddle) (the content extraction library), not in the Web Clipper extension itself. Feishu/Lark, WeChat, and Bilibili require more site-specific compatibility logic, so this fork maintains those changes independently for Chinese content users who need them now.
 
+### How to follow official updates?
+
+This fork keeps custom platform behavior under `src/platforms/*`, while the official-like core flow only keeps small platform hooks. This makes future merges from `obsidianmd/obsidian-clipper` easier to review. See [Upstream Sync Guide](./docs/upstream-sync.md) for the workflow and conflict rules, and [Manual Regression Checklist](./docs/manual-regression-checklist.md) for the URLs to verify after each upgrade.
+
 ## Get started
 
 ### Build from source

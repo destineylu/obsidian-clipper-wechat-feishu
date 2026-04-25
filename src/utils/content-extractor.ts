@@ -7,7 +7,7 @@ import { debugLog } from './debug';
 import dayjs from 'dayjs';
 import { AnyHighlightData, TextHighlightData, HighlightData } from './highlighter';
 import { generalSettings } from './storage-utils';
-import { buildFeishuMediaDownloadLinks, isFeishuDocUrl, inlineFeishuMediaPlaceholders } from './feishu-extractor';
+import { buildFeishuMediaDownloadLinks, isFeishuDocUrl, inlineFeishuMediaPlaceholders } from '../platforms/feishu/extractor';
 import {
 	getElementByXPath,
 	wrapElementWithMark,
@@ -44,6 +44,14 @@ function buildFeishuVideoBlockPlaceholder(index: number): string {
 	return `FEISHUVIDEOBLOCK${index}TOKEN`;
 }
 
+function cleanFeishuMediaTitle(title: string | undefined, token: string): string {
+	if (!title) return '';
+	return title
+		.replace(new RegExp(token, 'g'), '')
+		.replace(/[（）()【】\[\]\s]+$/g, '')
+		.trim();
+}
+
 function createFeishuMediaFallback(
 	label: string,
 	token: string,
@@ -52,8 +60,8 @@ function createFeishuMediaFallback(
 	displayKind: 'image' | 'video',
 	title?: string
 ): string {
-	const normalizedTitle = title?.trim();
-	const fallbackLabel = normalizedTitle ? `${label}：${normalizedTitle}` : `${label}：${token}`;
+	const normalizedTitle = cleanFeishuMediaTitle(title, token);
+	const fallbackLabel = normalizedTitle ? `${label}：${normalizedTitle}` : label;
 	const downloadLinks = buildFeishuMediaDownloadLinks(currentUrl, token, downloadKind);
 	const mediaUrl = browser.runtime.getURL(
 		`feishu-media.html?kind=${displayKind}&name=${encodeURIComponent(fallbackLabel)}&urls=${encodeURIComponent(JSON.stringify(downloadLinks))}`
@@ -75,7 +83,7 @@ function replaceUnresolvedFeishuMediaWithFallbacks(content: string, currentUrl: 
 		})
 		.replace(/<p><a href="feishu-file:\/\/([\w-]+)">([\s\S]*?)<\/a><\/p>/gi, (_, token: string, text: string) => {
 			const plainText = stripHtml(text || '');
-			return `<p><a href="${escapeHtml(currentUrl)}">${escapeHtml(plainText || `Feishu附件未内联：${token}`)}</a></p>`;
+			return `<p><a href="${escapeHtml(currentUrl)}">${escapeHtml(cleanFeishuMediaTitle(plainText, token) || 'Feishu附件未内联')}</a></p>`;
 		});
 }
 

@@ -127,17 +127,32 @@
 	#note-content-container {
 		border-top: 1px solid var(--divider-color);
 		display: flex;
+		flex-direction: column;
 		flex-grow: 1;
+		min-height: 0;
 		#note-content-field {
 			background-color: transparent;
 			border-radius: 0;
 			border: none;
 			padding: 10px var(--popup-padding);
 			resize: none;
+			flex: 1 1 auto;
+			min-height: 0;
 			&:active,
 			&:focus {
 				box-shadow: none;
 			}
+		}
+		#note-content-status {
+			border-top: 1px solid var(--divider-color);
+			color: var(--text-muted);
+			font-size: var(--font-ui-smaller);
+			line-height: 1.4;
+			min-height: 1.8rem;
+			padding: 5px var(--popup-padding) 6px;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
 		}
 	}
 

@@ -9,7 +9,7 @@ import { applyHighlights, invalidateHighlightCache, loadHighlights, toggleHighli
 import { copyToClipboard } from './clipboard-utils';
 import { getMessage, initializeI18n } from './i18n';
 import { getFontCss } from './font-utils';
-import { extractBilibiliStructuredContent, isBilibiliVideoUrl } from './bilibili-extractor';
+import { extractBilibiliStructuredContent, isBilibiliVideoUrl } from '../platforms/bilibili/extractor';
 import { createBilibiliPlaybackTracker } from './bilibili-playback-tracker';
 
 // Mobile viewport settings

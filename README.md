@@ -71,6 +71,10 @@
 
 官方维护者[指出](https://github.com/obsidianmd/obsidian-clipper/pull/1)，针对特定网站的内容提取器应该在 [Defuddle](https://github.com/kepano/defuddle)（内容提取库）中实现，而不是在 Web Clipper 扩展本身。飞书、微信公众号、Bilibili 这些平台的提取需要更多站点级兼容逻辑，本 Fork 独立维护这些改造，方便中文内容用户直接使用。
 
+### 如何跟随官方升级？
+
+本项目把自定义站点逻辑集中在 `src/platforms/*`，核心流程只保留少量平台钩子，便于后续合并官方 `obsidianmd/obsidian-clipper` 的更新。具体同步步骤和冲突处理原则见 [Upstream Sync Guide](./docs/upstream-sync.md)，每次升级后的重点验证网址见 [Manual Regression Checklist](./docs/manual-regression-checklist.md)。
+
 ## 快速开始
 
 ### 从源码构建

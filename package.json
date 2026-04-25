@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-clipper",
-	"version": "1.0.0",
+	"version": "1.6.1",
 	"description": "Official web clipper for Obsidian.",
 	"bin": {
 		"obsidian-clipper": "./dist/cli.cjs"
@@ -13,6 +13,10 @@
 		"./api": "./dist/api.mjs"
 	},
 	"scripts": {
+		"sync:official-version": "node scripts/sync-official-version.mjs",
+		"prebuild:chrome": "node scripts/sync-official-version.mjs",
+		"prebuild:firefox": "node scripts/sync-official-version.mjs",
+		"prebuild:safari": "node scripts/sync-official-version.mjs",
 		"defuddle-dev": "node scripts/set-defuddle-dev.js",
 		"defuddle-prod": "node scripts/set-defuddle-prod.js",
 		"dev:chrome": "webpack --watch --env BROWSER=chrome --mode development",
@@ -27,6 +31,7 @@
 		"dev": "npm run dev:chrome",
 		"test": "vitest run",
 		"test:watch": "vitest",
+		"check:custom-platforms": "node scripts/check-custom-platforms.mjs",
 		"update-locales": "ts-node --project scripts/tsconfig.json scripts/update-locales.ts",
 		"check-strings": "ts-node --project scripts/tsconfig.json scripts/check-unused-strings.ts",
 		"add-locale": "ts-node --project scripts/tsconfig.json scripts/add-locale.ts",

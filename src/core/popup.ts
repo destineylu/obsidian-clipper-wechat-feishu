@@ -53,6 +53,41 @@ function getVariablesCacheKey(variables: { [key: string]: string }): string {
 	return hashString(JSON.stringify(sortedEntries));
 }
 
+function countMarkdownImages(content: string): number {
+	return content.match(/!\[[^\]]*]\([^)]*\)/g)?.length || 0;
+}
+
+function countLinkedImages(content: string): number {
+	return (content.match(/Feishu图片(?:附件)?未内联|飞书图片(?:附件)?未内联/g) || []).length;
+}
+
+function countMediaLinks(content: string): number {
+	return (content.match(/微信视频|微信音频|Feishu视频|飞书视频|视频未内联|音频未内联/g) || []).length;
+}
+
+function updateNoteContentStatus(content: string): void {
+	const status = document.getElementById('note-content-status');
+	if (!status) return;
+
+	if (!content.trim()) {
+		status.textContent = '';
+		return;
+	}
+
+	const numberFormatter = new Intl.NumberFormat();
+	const textLength = content.replace(/\s+/g, '').length;
+	const imageCount = countMarkdownImages(content) + countLinkedImages(content);
+	const mediaCount = countMediaLinks(content);
+	const parts = [
+		`已提取 ${numberFormatter.format(textLength)} 字`,
+		`${numberFormatter.format(imageCount)} 张图片`,
+	];
+	if (mediaCount > 0) {
+		parts.push(`${numberFormatter.format(mediaCount)} 个媒体链接`);
+	}
+	status.textContent = parts.join(' · ');
+}
+
 // Memoize compileTemplate with a short expiration and variable-sensitive key
 const memoizedCompileTemplate = memoizeWithExpiration(
 	async (tabId: number, template: string, variables: { [key: string]: string }, currentUrl: string) => {
@@ -429,6 +464,11 @@ function setupEventListeners(tabId: number) {
 				e.preventDefault();
 			}
 		});
+	}
+
+	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
+	if (noteContentField) {
+		noteContentField.addEventListener('input', () => updateNoteContentStatus(noteContentField.value));
 	}
 
 	const highlighterModeButton = document.getElementById('highlighter-mode');
@@ -862,6 +902,7 @@ function buildTemplateFieldsSkeleton(template: Template | null) {
 	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 	if (noteContentField) {
 		noteContentField.setAttribute('data-template-value', template.noteContentFormat || '');
+		updateNoteContentStatus('');
 	}
 
 	// Show/hide interpreter section based on template prompt variables
@@ -943,6 +984,7 @@ async function fillTemplateFieldValues(currentTabId: number, template: Template 
 	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 	if (noteContentField) {
 		noteContentField.value = template.noteContentFormat ? formattedContent : '';
+		updateNoteContentStatus(noteContentField.value);
 	}
 
 	if (generalSettings.interpreterEnabled) {
