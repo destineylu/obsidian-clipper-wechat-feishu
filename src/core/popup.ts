@@ -40,7 +40,20 @@ const isSidePanel = window.location.pathname.includes('side-panel.html');
 const urlParams = new URLSearchParams(window.location.search);
 const isIframe = urlParams.get('context') === 'iframe';
 
-// Memoize compileTemplate with a short expiration and URL-sensitive key
+function hashString(value: string): string {
+	let hash = 5381;
+	for (let i = 0; i < value.length; i++) {
+		hash = ((hash << 5) + hash) ^ value.charCodeAt(i);
+	}
+	return (hash >>> 0).toString(36);
+}
+
+function getVariablesCacheKey(variables: { [key: string]: string }): string {
+	const sortedEntries = Object.entries(variables).sort(([left], [right]) => left.localeCompare(right));
+	return hashString(JSON.stringify(sortedEntries));
+}
+
+// Memoize compileTemplate with a short expiration and variable-sensitive key
 const memoizedCompileTemplate = memoizeWithExpiration(
 	async (tabId: number, template: string, variables: { [key: string]: string }, currentUrl: string) => {
 		return compileTemplate(tabId, template, variables, currentUrl);
@@ -48,7 +61,7 @@ const memoizedCompileTemplate = memoizeWithExpiration(
 	{
 		expirationMs: 5000,
 		keyFn: (tabId: number, template: string, variables: { [key: string]: string }, currentUrl: string) =>
-			`${tabId}-${template}-${currentUrl}`
+			`${tabId}-${hashString(template)}-${currentUrl}-${getVariablesCacheKey(variables)}`
 	}
 );
 
@@ -287,7 +300,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 		// Get the active tab via background script to handle Firefox compatibility
 		const response = await browser.runtime.sendMessage({ action: "getActiveTab" }) as { tabId?: number; error?: string };
 		if (!response || response.error || !response.tabId) {
-			showError(getMessage('pleaseReload'));
+			showError(getMessage('pleaseReload'), { translate: false });
 			return;
 		}
 		
@@ -389,10 +402,10 @@ document.addEventListener('DOMContentLoaded', async function() {
 				await refreshFields(currentTabId);
 			} catch (error) {
 				console.error('Error initializing popup:', error);
-				showError(getMessage('pleaseReload'));
+				showError(getMessage('pleaseReload'), { translate: false });
 			}
 		} else {
-			showError(getMessage('pleaseReload'));
+			showError(getMessage('pleaseReload'), { translate: false });
 		}
 	} catch (error) {
 		console.error('Error getting active tab:', error);
@@ -598,12 +611,12 @@ async function initializeUI() {
 	}
 }
 
-function showError(messageKey: string): void {
+function showError(message: string, options: { translate?: boolean } = {}): void {
 	const errorMessage = document.querySelector('.error-message') as HTMLElement;
 	const clipper = document.querySelector('.clipper') as HTMLElement;
 
 	if (errorMessage && clipper) {
-		errorMessage.textContent = getMessage(messageKey);
+		errorMessage.textContent = options.translate === false ? message : getMessage(message);
 		errorMessage.style.display = 'flex';
 		clipper.style.display = 'none';
 
@@ -667,6 +680,8 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 			showError('pageCannotBeClipped');
 			return;
 		}
+
+		clearError();
 
 		// Start content extraction (don't await yet)
 		const extractionPromise = memoizedExtractPageContent(tabId);
@@ -735,7 +750,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 	} catch (error) {
 		console.error('Error refreshing fields:', error);
 		const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-		showError(errorMessage);
+		showError(errorMessage, { translate: false });
 	}
 }
 

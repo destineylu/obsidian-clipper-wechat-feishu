@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Feishu media</title>
+		<script src="browser-polyfill.min.js"></script>
+		<script defer src="feishu-media.js"></script>
+		<style>
+			body {
+				margin: 0;
+				min-height: 100vh;
+				display: grid;
+				place-items: center;
+				background: #111;
+				color: #f4f4f5;
+				font: 14px/1.5 system-ui, sans-serif;
+			}
+
+			main {
+				width: min(100vw - 32px, 1200px);
+				padding: 16px;
+			}
+
+			img,
+			video {
+				display: block;
+				max-width: 100%;
+				max-height: calc(100vh - 96px);
+				margin: 0 auto;
+				background: #000;
+			}
+
+			a {
+				color: #93c5fd;
+			}
+		</style>
+	</head>
+	<body>
+		<main id="app">Loading Feishu media...</main>
+	</body>
+</html>

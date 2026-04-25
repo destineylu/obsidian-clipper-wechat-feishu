@@ -1,12 +1,13 @@
 import { ExtractedContent } from '../types/types';
 import { createMarkdownContent } from 'defuddle/full';
-import { sanitizeFileName } from './string-utils';
+import { sanitizeFileName, escapeHtml } from './string-utils';
 import { buildVariables, addSchemaOrgDataToVariables } from './shared';
 import browser from './browser-polyfill';
 import { debugLog } from './debug';
 import dayjs from 'dayjs';
 import { AnyHighlightData, TextHighlightData, HighlightData } from './highlighter';
 import { generalSettings } from './storage-utils';
+import { buildFeishuMediaDownloadLinks, isFeishuDocUrl, inlineFeishuMediaPlaceholders } from './feishu-extractor';
 import {
 	getElementByXPath,
 	wrapElementWithMark,
@@ -21,15 +22,15 @@ interface ElementHighlightData extends HighlightData {
 function canHighlightElement(element: Element): boolean {
 	// List of elements that can't be nested inside mark
 	const unsupportedElements = ['img', 'video', 'audio', 'iframe', 'canvas', 'svg', 'math', 'table'];
-	
+
 	// Check if the element contains any unsupported elements
-	const hasUnsupportedElements = unsupportedElements.some(tag => 
+	const hasUnsupportedElements = unsupportedElements.some(tag =>
 		element.getElementsByTagName(tag).length > 0
 	);
-	
+
 	// Check if the element itself is an unsupported type
 	const isUnsupportedType = unsupportedElements.includes(element.tagName.toLowerCase());
-	
+
 	return !hasUnsupportedElements && !isUnsupportedType;
 }
 
@@ -37,6 +38,105 @@ function stripHtml(html: string): string {
 	const parser = new DOMParser();
 	const doc = parser.parseFromString(html, 'text/html');
 	return doc.body.textContent || '';
+}
+
+function buildFeishuVideoBlockPlaceholder(index: number): string {
+	return `FEISHUVIDEOBLOCK${index}TOKEN`;
+}
+
+function createFeishuMediaFallback(
+	label: string,
+	token: string,
+	currentUrl: string,
+	downloadKind: 'image' | 'file',
+	displayKind: 'image' | 'video',
+	title?: string
+): string {
+	const normalizedTitle = title?.trim();
+	const fallbackLabel = normalizedTitle ? `${label}：${normalizedTitle}` : `${label}：${token}`;
+	const downloadLinks = buildFeishuMediaDownloadLinks(currentUrl, token, downloadKind);
+	const mediaUrl = browser.runtime.getURL(
+		`feishu-media.html?kind=${displayKind}&name=${encodeURIComponent(fallbackLabel)}&urls=${encodeURIComponent(JSON.stringify(downloadLinks))}`
+	);
+	return `<a href="${escapeHtml(mediaUrl)}">${escapeHtml(fallbackLabel)}</a>`;
+}
+
+function replaceUnresolvedFeishuMediaWithFallbacks(content: string, currentUrl: string): string {
+	return content
+		.replace(/<figure[^>]*>\s*<img[^>]*src="feishu-image:\/\/([\w-]+)"[^>]*alt="([^"]*)"[^>]*>\s*<\/figure>/gi, (_, token: string, alt: string) => {
+			return `<p>${createFeishuMediaFallback('Feishu图片未内联', token, currentUrl, 'image', 'image', alt)}</p>`;
+		})
+		.replace(/<figure[^>]*>\s*<img[^>]*src="feishu-file:\/\/([\w-]+)"[^>]*alt="([^"]*)"[^>]*>\s*<\/figure>/gi, (_, token: string, alt: string) => {
+			return `<p>${createFeishuMediaFallback('Feishu图片附件未内联', token, currentUrl, 'file', 'image', alt)}</p>`;
+		})
+		.replace(/<figure[^>]*>\s*<video[^>]*src="feishu-file:\/\/([\w-]+)"[^>]*><\/video>(?:\s*<figcaption>([\s\S]*?)<\/figcaption>)?\s*<\/figure>/gi, (_, token: string, caption: string) => {
+			const plainCaption = stripHtml(caption || '');
+			return `<p>${createFeishuMediaFallback('Feishu视频未内联', token, currentUrl, 'file', 'video', plainCaption)}</p>`;
+		})
+		.replace(/<p><a href="feishu-file:\/\/([\w-]+)">([\s\S]*?)<\/a><\/p>/gi, (_, token: string, text: string) => {
+			const plainText = stripHtml(text || '');
+			return `<p><a href="${escapeHtml(currentUrl)}">${escapeHtml(plainText || `Feishu附件未内联：${token}`)}</a></p>`;
+		});
+}
+
+function mergeFeishuMarkdownAndVideoHtml(content: string, currentUrl: string): string {
+	const contentWithFallbacks = replaceUnresolvedFeishuMediaWithFallbacks(content, currentUrl);
+	const videoPattern = /<figure[^>]*>\s*<video[\s\S]*?<\/video>(?:[\s\S]*?<figcaption>[\s\S]*?<\/figcaption>)?\s*<\/figure>/gi;
+	const videoBlocks = Array.from(contentWithFallbacks.matchAll(videoPattern), match => match[0]);
+	let htmlWithoutVideos = contentWithFallbacks;
+
+	videoBlocks.forEach((block, index) => {
+		htmlWithoutVideos = htmlWithoutVideos.replace(block, `\n\n${buildFeishuVideoBlockPlaceholder(index)}\n\n`);
+	});
+
+	let markdownBody = createMarkdownContent(htmlWithoutVideos, currentUrl);
+	videoBlocks.forEach((block, index) => {
+		markdownBody = markdownBody.replace(buildFeishuVideoBlockPlaceholder(index), block);
+	});
+
+	return markdownBody;
+}
+
+const MAX_FEISHU_INLINE_CONCURRENCY = 2;
+const FEISHU_IMAGE_SLOW_WARNING_THRESHOLD = 30;
+const FEISHU_IMAGE_UNOPENABLE_WARNING_THRESHOLD = 50;
+
+type FeishuMediaInliningPolicy = 'inline' | 'skip';
+
+function getMatchCount(content: string, pattern: RegExp): number {
+	return content.match(pattern)?.length || 0;
+}
+
+function getFeishuMediaPlaceholderSummary(content: string): {
+	imagePlaceholderCount: number;
+	filePlaceholderCount: number;
+	totalPlaceholderCount: number;
+} {
+	const imagePlaceholderCount = getMatchCount(content, /feishu-image:\/\//gi);
+	const filePlaceholderCount = getMatchCount(content, /feishu-file:\/\//gi);
+	return {
+		imagePlaceholderCount,
+		filePlaceholderCount,
+		totalPlaceholderCount: imagePlaceholderCount + filePlaceholderCount,
+	};
+}
+
+function getFeishuMediaInliningPolicy(content: string, downloadImages: boolean): FeishuMediaInliningPolicy {
+	const { totalPlaceholderCount } = getFeishuMediaPlaceholderSummary(content);
+	if (!totalPlaceholderCount) return 'inline';
+	return downloadImages ? 'inline' : 'skip';
+}
+
+function getFeishuImageWarningMarkdown(imageCount: number): string {
+	if (imageCount < FEISHU_IMAGE_SLOW_WARNING_THRESHOLD) return '';
+	const severity = imageCount >= FEISHU_IMAGE_UNOPENABLE_WARNING_THRESHOLD
+		? '有可能导致 Obsidian 无法打开该笔记'
+		: '可能导致 Obsidian 打开速度极慢';
+	return [
+		'> [!warning] 飞书图片数量较多',
+		`> 本文档包含约 ${imageCount} 张飞书图片，${severity}。如果出现卡死，请在剪藏器设置中关闭“下载图片”，重新剪藏为图片链接。`,
+		'',
+	].join('\n');
 }
 
 interface ContentResponse {
@@ -153,7 +253,46 @@ export async function initializePageContent(
 			content = processHighlights(content, highlights);
 		}
 
-		const markdownBody = createMarkdownContent(content, currentUrl);
+		const isFeishu = isFeishuDocUrl(currentUrl);
+		const feishuPlaceholderSummary = isFeishu
+			? getFeishuMediaPlaceholderSummary(content)
+			: { imagePlaceholderCount: 0, filePlaceholderCount: 0, totalPlaceholderCount: 0 };
+		const feishuMediaInliningPolicy = isFeishu
+			? getFeishuMediaInliningPolicy(content, generalSettings.feishuDownloadImages)
+			: 'inline';
+
+		if (isFeishu && feishuPlaceholderSummary.totalPlaceholderCount > 0) {
+			if (feishuMediaInliningPolicy === 'inline') {
+				content = await inlineFeishuMediaPlaceholders(content, currentUrl, {
+					maxFiles: 0,
+					concurrency: MAX_FEISHU_INLINE_CONCURRENCY,
+				});
+			}
+		}
+
+		const markdownBody = isFeishu
+			? mergeFeishuMarkdownAndVideoHtml(content, currentUrl)
+			: createMarkdownContent(content, currentUrl);
+		const finalMarkdownBody = isFeishu && generalSettings.feishuDownloadImages
+			? `${getFeishuImageWarningMarkdown(feishuPlaceholderSummary.imagePlaceholderCount)}${markdownBody}`
+			: markdownBody;
+		if (isFeishu) {
+			const finalPlaceholderSummary = getFeishuMediaPlaceholderSummary(content);
+			console.log('[Feishu Clipper] Final content variable summary:', {
+				url: currentUrl,
+				contentLength: content.length,
+				markdownBodyLength: finalMarkdownBody.length,
+				imgCount: (content.match(/<img\b/gi) || []).length,
+				videoCount: (content.match(/<video\b/gi) || []).length,
+				initialImagePlaceholderCount: feishuPlaceholderSummary.imagePlaceholderCount,
+				initialFilePlaceholderCount: feishuPlaceholderSummary.filePlaceholderCount,
+				finalImagePlaceholderCount: finalPlaceholderSummary.imagePlaceholderCount,
+				finalFilePlaceholderCount: finalPlaceholderSummary.filePlaceholderCount,
+				feishuMediaInliningPolicy,
+				feishuDownloadImages: generalSettings.feishuDownloadImages,
+				usingStructuredHtmlAsContent: false,
+			});
+		}
 
 		// Convert each highlight to markdown individually
 		const highlightsData = highlights.map(highlight => {
@@ -178,7 +317,7 @@ export async function initializePageContent(
 		const currentVariables = buildVariables({
 			title,
 			author,
-			content: markdownBody,
+			content: finalMarkdownBody,
 			contentHtml: content,
 			url: currentUrl,
 			fullHtml,
@@ -252,7 +391,7 @@ function processHighlights(content: string, highlights: AnyHighlightData[]): str
 				result += node.textContent;
 			}
 		});
-		
+
 		return result;
 	}
 
@@ -325,7 +464,7 @@ function processContentBasedHighlight(highlight: TextHighlightData | ElementHigh
 	// Serialize the inner content
 	const serializer = new XMLSerializer();
 	let innerContent = '';
-	
+
 	if (contentDiv.children.length === 1 && contentDiv.firstElementChild?.tagName === 'DIV') {
 		Array.from(contentDiv.firstElementChild.childNodes).forEach(node => {
 			if (node.nodeType === Node.ELEMENT_NODE) {
@@ -356,11 +495,11 @@ function processContentParagraphs(sourceParagraphs: Element[], tempDiv: HTMLDivE
 	sourceParagraphs.forEach(sourceParagraph => {
 		const sourceText = stripHtml(sourceParagraph.outerHTML).trim();
 		debugLog('Highlights', 'Looking for paragraph:', sourceText);
-		
+
 		const paragraphs = Array.from(tempDiv.querySelectorAll('p'));
 		for (const targetParagraph of paragraphs) {
 			const targetText = stripHtml(targetParagraph.outerHTML).trim();
-			
+
 			if (targetText === sourceText) {
 				debugLog('Highlights', 'Found matching paragraph:', targetParagraph.outerHTML);
 				wrapElementWithMark(targetParagraph);
@@ -373,24 +512,24 @@ function processContentParagraphs(sourceParagraphs: Element[], tempDiv: HTMLDivE
 function processInlineContent(content: string, tempDiv: HTMLDivElement) {
 	const searchText = stripHtml(content).trim();
 	debugLog('Highlights', 'Searching for text:', searchText);
-	
+
 	const walker = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT);
-	
+
 	let node;
 	while (node = walker.nextNode() as Text) {
 		const nodeText = node.textContent || '';
 		const index = nodeText.indexOf(searchText);
-		
+
 		if (index !== -1) {
 			debugLog('Highlights', 'Found matching text in node:', {
 				text: nodeText,
 				index: index
 			});
-			
+
 			const range = document.createRange();
 			range.setStart(node, index);
 			range.setEnd(node, index + searchText.length);
-			
+
 			const mark = document.createElement('mark');
 			range.surroundContents(mark);
 			debugLog('Highlights', 'Created mark element:', mark.outerHTML);

@@ -96,6 +96,9 @@ export function escapeHtml(unsafe: string): string {
 export function makeUrlAbsolute(element: Element, attributeName: string, baseUrl: URL) {
 	const attributeValue = element.getAttribute(attributeName);
 	if (attributeValue) {
+		if (/^feishu-(image|file):\/\//i.test(attributeValue)) {
+			return;
+		}
 		try {
 			// Create a new URL object from the base URL
 			const resolvedBaseUrl = new URL(baseUrl.href);

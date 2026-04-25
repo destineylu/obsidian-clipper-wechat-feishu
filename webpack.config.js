@@ -43,6 +43,7 @@ module.exports = (env, argv) => {
 			settings: './src/core/settings.ts',
 			content: './src/content.ts',
 			background: './src/background.ts',
+			'feishu-media': './src/feishu-media.ts',
 			style: './src/style.scss',
 			highlighter: './src/highlighter.scss',
 			reader: './src/reader.scss',
@@ -142,6 +143,7 @@ module.exports = (env, argv) => {
 						to: "manifest.json" 
 					},
 					{ from: "src/popup.html", to: "popup.html" },
+					{ from: "src/feishu-media.html", to: "feishu-media.html" },
 					{ from: "src/side-panel.html", to: "side-panel.html" },
 					{ from: "src/settings.html", to: "settings.html" },
 					{ from: "src/icons", to: "icons" },

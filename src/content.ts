@@ -37,9 +37,197 @@ declare global {
 			const readerDoc = doc.implementation.createHTMLDocument();
 			const originalHtml = readerArticle.getAttribute('data-original-html');
 			readerDoc.body.innerHTML = originalHtml || readerArticle.innerHTML;
-			return new Defuddle(readerDoc, { url: '' }).parse();
+			normalizeLazyImages(readerDoc, doc.URL || location.href);
+			const parsed = new Defuddle(readerDoc, { url: '' }).parse();
+			return applySiteContentFallback(readerDoc, parsed, doc.URL || location.href);
 		}
-		return new Defuddle(doc, { url: doc.URL }).parse();
+		normalizeLazyImages(doc, doc.URL || location.href);
+		const parsed = new Defuddle(doc, { url: doc.URL }).parse();
+		return applySiteContentFallback(doc, parsed, doc.URL || location.href);
+	}
+
+	function isUsefulImageUrl(value: string | null): value is string {
+		if (!value) return false;
+		if (/^data:image\/svg\+xml/i.test(value)) return false;
+		if (/^data:image\/gif/i.test(value) && value.length < 200) return false;
+		return true;
+	}
+
+	function resolveImageUrl(value: string, baseUrl: string): string {
+		const url = new URL(value, baseUrl);
+		if (url.hostname.endsWith('mmbiz.qpic.cn') && /^#imgIndex=/i.test(url.hash)) {
+			url.hash = '';
+		}
+		return url.href;
+	}
+
+	function getLazyImageUrl(img: HTMLImageElement): string | null {
+		const lazyAttributes = [
+			'data-src',
+			'data-original',
+			'data-actualsrc',
+			'data-lazy-src',
+			'data-backsrc',
+			'data-url',
+			'data-echo',
+		];
+
+		for (const attr of lazyAttributes) {
+			const value = img.getAttribute(attr);
+			if (isUsefulImageUrl(value)) return value;
+		}
+
+		return null;
+	}
+
+	function normalizeLazyImages(doc: Document, baseUrl: string): void {
+		let parsedUrl: URL | null = null;
+		try {
+			parsedUrl = new URL(baseUrl);
+		} catch {
+			parsedUrl = null;
+		}
+		const isWeChatArticle = parsedUrl?.hostname === 'mp.weixin.qq.com';
+
+		doc.querySelectorAll('img').forEach((img) => {
+			const image = img as HTMLImageElement;
+			const currentSrc = image.getAttribute('src');
+			const lazySrc = getLazyImageUrl(image);
+			const nextSrc = isWeChatArticle ? lazySrc : (isUsefulImageUrl(currentSrc) ? null : lazySrc);
+			if (!nextSrc) return;
+
+			try {
+				image.setAttribute('src', resolveImageUrl(nextSrc, baseUrl));
+				image.removeAttribute('srcset');
+				image.removeAttribute('data-srcset');
+			} catch {
+				image.setAttribute('src', nextSrc);
+			}
+		});
+	}
+
+	function isWeChatArticleUrl(baseUrl: string): boolean {
+		try {
+			return new URL(baseUrl).hostname === 'mp.weixin.qq.com';
+		} catch {
+			return false;
+		}
+	}
+
+	function countImageTags(html: string): number {
+		return html.match(/<img\b/gi)?.length || 0;
+	}
+
+	function getWeChatVideoArticleUrl(container: Element, baseUrl: string): string | null {
+		const videoId = container.getAttribute('data-mpvid') || container.getAttribute('vid') || container.getAttribute('data-vid');
+		if (!videoId) return null;
+
+		try {
+			const url = new URL(baseUrl);
+			const anchorId = container.id;
+			if (anchorId) {
+				url.hash = anchorId;
+			}
+			return url.href;
+		} catch {
+			return baseUrl;
+		}
+	}
+
+	function getWeChatVideoCover(container: Element): string | null {
+		const rawCover = container.getAttribute('data-cover');
+		if (!rawCover) return null;
+
+		try {
+			const decoded = decodeURIComponent(rawCover);
+			return decoded.replace(/^http:\/\//i, 'https://');
+		} catch {
+			return rawCover.replace(/^http:\/\//i, 'https://');
+		}
+	}
+
+	function replaceWeChatVideosWithLinks(article: Element, baseUrl: string): void {
+		const videoContainers = Array.from(
+			article.querySelectorAll('.video_iframe[data-src], [data-mpvid][data-src], iframe[data-src*="video_player_tmpl"]')
+		).filter(container => !container.parentElement?.closest('.video_iframe[data-src], [data-mpvid][data-src], iframe[data-src*="video_player_tmpl"]'));
+
+		videoContainers.forEach((container, index) => {
+			const articleUrl = getWeChatVideoArticleUrl(container, baseUrl);
+			if (!articleUrl) return;
+
+			const doc = container.ownerDocument;
+			const figure = doc.createElement('figure');
+			const caption = doc.createElement('figcaption');
+			const captionLink = doc.createElement('a');
+			const videoId = container.getAttribute('data-mpvid') || container.getAttribute('vid') || container.getAttribute('data-vid') || String(index + 1);
+			captionLink.href = articleUrl;
+			captionLink.textContent = `微信视频：${videoId}（打开原文播放）`;
+			caption.appendChild(captionLink);
+
+			const coverUrl = getWeChatVideoCover(container);
+			if (coverUrl) {
+				const link = doc.createElement('a');
+				link.href = articleUrl;
+				const img = doc.createElement('img');
+				img.src = coverUrl;
+				img.alt = `微信视频封面：${videoId}`;
+				link.appendChild(img);
+				figure.appendChild(link);
+			}
+
+			figure.appendChild(caption);
+			container.replaceWith(figure);
+		});
+	}
+
+	function cleanClonedArticle(article: Element, baseUrl: string): string {
+		const clone = article.cloneNode(true) as Element;
+		if (isWeChatArticleUrl(baseUrl)) {
+			replaceWeChatVideosWithLinks(clone, baseUrl);
+		}
+		clone.querySelectorAll('script, style, noscript').forEach(el => el.remove());
+		clone.querySelectorAll('video[src*="mpvideo.qpic.cn"]').forEach(el => el.remove());
+		clone.querySelectorAll('img').forEach(img => {
+			if (!isUsefulImageUrl(img.getAttribute('src'))) {
+				img.remove();
+			}
+		});
+		clone.querySelectorAll('*').forEach(el => {
+			el.removeAttribute('style');
+			el.removeAttribute('class');
+			el.removeAttribute('id');
+		});
+		return clone.innerHTML;
+	}
+
+	function extractWeChatArticleContent(doc: Document, baseUrl: string): string | null {
+		if (!isWeChatArticleUrl(baseUrl)) return null;
+
+		const article = doc.querySelector('#js_content') || doc.querySelector('.rich_media_content');
+		if (!article) return null;
+
+		const content = cleanClonedArticle(article, baseUrl);
+		return countImageTags(content) > 0 || /mp\/readtemplate\?t=pages\/video_player_tmpl/i.test(content) ? content : null;
+	}
+
+	function applySiteContentFallback(doc: Document, parsed: any, baseUrl: string): any {
+		const weChatContent = extractWeChatArticleContent(doc, baseUrl);
+		if (!weChatContent) return parsed;
+
+		const parsedImageCount = countImageTags(parsed?.content || '');
+		const weChatImageCount = countImageTags(weChatContent);
+		if (weChatImageCount <= parsedImageCount) return parsed;
+
+		debugLog('Clipper', 'Using WeChat article content fallback', {
+			url: baseUrl,
+			parsedImageCount,
+			weChatImageCount,
+		});
+
+		return {
+			...parsed,
+			content: weChatContent,
+		};
 	}
 
 	let isHighlighterMode = false;
@@ -310,6 +498,8 @@ declare global {
 			// Flatten shadow DOM before extraction (async, needs main world)
 			const flattenTimeout = new Promise<void>(resolve => setTimeout(resolve, 3000));
 			Promise.race([flattenShadowDom(document), flattenTimeout]).then(async () => {
+				normalizeLazyImages(document, document.URL || location.href);
+
 				let selectedHtml = '';
 				const selection = window.getSelection();
 
@@ -327,8 +517,9 @@ declare global {
 				const parseTimeout = new Promise<never>((_, reject) =>
 					setTimeout(() => reject(new Error('parseAsync timeout')), 8000)
 				);
-				const defuddled = await Promise.race([defuddle.parseAsync(), parseTimeout])
+				let defuddled = await Promise.race([defuddle.parseAsync(), parseTimeout])
 					.catch(() => defuddle.parse());
+				defuddled = applySiteContentFallback(document, defuddled, document.URL || location.href);
 			const bilibiliContent = isBilibiliVideoUrl(document.URL)
 				? await extractBilibiliStructuredContent(document).catch((error) => {
 					console.warn('Failed to extract Bilibili structured content:', error);

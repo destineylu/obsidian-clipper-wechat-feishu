@@ -102,6 +102,50 @@ function isAllowedBilibiliFetchUrl(url: string): boolean {
 	}
 }
 
+function isExtensionOrBrowserPage(url: string): boolean {
+	return url.startsWith('chrome-extension://')
+		|| url.startsWith('moz-extension://')
+		|| url.startsWith('edge://')
+		|| url.startsWith('chrome://')
+		|| url.startsWith('about:')
+		|| url.startsWith('devtools://');
+}
+
+function isClipworthyTab(tab: browser.Tabs.Tab | undefined): tab is browser.Tabs.Tab & { id: number; url: string } {
+	return !!(tab?.id && tab.url && isValidUrl(tab.url) && !isBlankPage(tab.url));
+}
+
+async function getPreferredActiveTab(): Promise<(browser.Tabs.Tab & { id: number; url: string }) | undefined> {
+	const candidateGroups = await Promise.all([
+		browser.tabs.query({ active: true, lastFocusedWindow: true }),
+		browser.tabs.query({ active: true, currentWindow: true }),
+		browser.tabs.query({ active: true }),
+	]);
+
+	for (const tabs of candidateGroups) {
+		const clipworthyTab = tabs.find(isClipworthyTab);
+		if (clipworthyTab) {
+			return clipworthyTab;
+		}
+	}
+
+	for (const tabs of candidateGroups) {
+		const fallbackTab = tabs.find(tab => tab.id && tab.url && !isExtensionOrBrowserPage(tab.url));
+		if (fallbackTab?.id && fallbackTab.url) {
+			return fallbackTab as browser.Tabs.Tab & { id: number; url: string };
+		}
+	}
+
+	for (const tabs of candidateGroups) {
+		const firstTab = tabs.find((tab): tab is browser.Tabs.Tab & { id: number; url: string } => !!(tab.id && tab.url));
+		if (firstTab) {
+			return firstTab;
+		}
+	}
+
+	return undefined;
+}
+
 /**
  * 通过后台统一抓取 B 站 JSON，复用登录态并补全 Referer。
  */
@@ -183,9 +227,15 @@ async function fetchFeishuApi(url: string, options?: { method?: string; body?: s
 	const method = options?.method || 'GET';
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${token}`,
-		'Content-Type': 'application/json; charset=utf-8',
 		...options?.headers,
 	};
+
+	if (!headers.Accept) {
+		headers.Accept = 'application/json';
+	}
+	if (options?.body && method !== 'GET' && !headers['Content-Type']) {
+		headers['Content-Type'] = 'application/json; charset=utf-8';
+	}
 
 	const fetchOptions: RequestInit = { method, headers, cache: 'no-store' };
 	if (options?.body && method !== 'GET') {
@@ -204,6 +254,49 @@ async function fetchFeishuApi(url: string, options?: { method?: string; body?: s
 	}
 
 	return result;
+}
+
+async function fetchFeishuMedia(url: string, maxBytes?: number): Promise<{ dataUrl: string; contentType: string; size: number }> {
+	if (!isAllowedFeishuFetchUrl(url)) {
+		throw new Error('Blocked Feishu fetch URL');
+	}
+
+	const token = await getFeishuTenantToken();
+	const response = await fetch(url, {
+		method: 'GET',
+		cache: 'no-store',
+		headers: {
+			Authorization: `Bearer ${token}`,
+		},
+	});
+
+	if (!response.ok) {
+		throw new Error(`Feishu media HTTP ${response.status}: ${url}`);
+	}
+
+	const blob = await response.blob();
+	if (maxBytes && blob.size > maxBytes) {
+		throw new Error(`Feishu media too large (${blob.size} bytes)`);
+	}
+
+	const dataUrl = await new Promise<string>((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => {
+			if (typeof reader.result === 'string') {
+				resolve(reader.result);
+			} else {
+				reject(new Error('Unexpected FileReader result for Feishu media'));
+			}
+		};
+		reader.onerror = () => reject(reader.error || new Error('Failed to read Feishu media blob'));
+		reader.readAsDataURL(blob);
+	});
+
+	return {
+		dataUrl,
+		contentType: blob.type || response.headers.get('content-type') || 'application/octet-stream',
+		size: blob.size,
+	};
 }
 
 let sidePanelOpenWindows: Set<number> = new Set();
@@ -450,6 +543,19 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			return true;
 		}
 
+		if (typedRequest.action === 'fetchFeishuMedia' && typedRequest.url) {
+			const maxBytes = (typedRequest as any).maxBytes as number | undefined;
+			fetchFeishuMedia(typedRequest.url, maxBytes).then((data) => {
+				sendResponse({ success: true, data });
+			}).catch((error) => {
+				sendResponse({
+					success: false,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			});
+			return true;
+		}
+
 		if (typedRequest.action === "sidePanelOpened") {
 			if (sender.tab && sender.tab.windowId) {
 				sidePanelOpenWindows.add(sender.tab.windowId);
@@ -548,17 +654,14 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 		}
 
 		if (typedRequest.action === "getActiveTabAndToggleIframe") {
-			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
-				const currentTab = tabs[0];
-				if (currentTab && currentTab.id) {
+			getPreferredActiveTab().then(async (currentTab) => {
+				if (currentTab) {
 					try {
-						// Check if the URL is valid before trying to inject content script
 						if (!currentTab.url || !isValidUrl(currentTab.url) || isBlankPage(currentTab.url)) {
 							sendResponse({success: false, error: 'Cannot open iframe on this page'});
 							return;
 						}
 
-						// Ensure content script is loaded first
 						await ensureContentScriptLoadedInBackground(currentTab.id);
 						await browser.tabs.sendMessage(currentTab.id, { action: "toggle-iframe" });
 						sendResponse({success: true});
@@ -590,16 +693,8 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 		}
 
 		if (typedRequest.action === "getActiveTab") {
-			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
-				let currentTab = tabs[0];
-				// Fallback for when currentWindow has no tabs (e.g., debugging popup in DevTools)
-				if (!currentTab || !currentTab.id) {
-					const allActiveTabs = await browser.tabs.query({active: true});
-					currentTab = allActiveTabs.find(tab =>
-						tab.id && tab.url && !tab.url.startsWith('chrome-extension://') && !tab.url.startsWith('moz-extension://')
-					) || allActiveTabs[0];
-				}
-				if (currentTab && currentTab.id) {
+			getPreferredActiveTab().then((currentTab) => {
+				if (currentTab?.id) {
 					sendResponse({tabId: currentTab.id});
 				} else {
 					sendResponse({error: 'No active tab found'});
@@ -764,7 +859,8 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			typedRequest.action === "toggleHighlighterMode" ||
 			typedRequest.action === "openObsidianUrl" ||
 			typedRequest.action === 'fetchBilibiliJson' ||
-			typedRequest.action === 'fetchFeishuApi') {
+			typedRequest.action === 'fetchFeishuApi' ||
+			typedRequest.action === 'fetchFeishuMedia') {
 			return true;
 		}
 	}

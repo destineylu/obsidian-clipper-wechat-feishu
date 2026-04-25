@@ -327,6 +327,12 @@
 	"feedbackTitle": {
 		"message": "感谢您的反馈"
 	},
+	"feishuDownloadImages": {
+		"message": "下载图片"
+	},
+	"feishuDownloadImagesDescription": {
+		"message": "默认关闭。飞书图片需要通过飞书 API 获取并内联，图片多时会显著增大笔记体积。大文档建议保持关闭，让 Obsidian 快速打开；仅在需要完整图文副本时开启。图片约 30 张开始可能明显变慢；50 张以上有可能导致 Obsidian 无法打开该笔记。"
+	},
 	"folder": {
 		"message": "文件夹"
 	},

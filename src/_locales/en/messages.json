@@ -327,6 +327,12 @@
 	"feedbackTitle": {
 		"message": "Thanks for your feedback"
 	},
+	"feishuDownloadImages": {
+		"message": "Download images"
+	},
+	"feishuDownloadImagesDescription": {
+		"message": "Off by default. Feishu images must be fetched through the Feishu API and inlined, which can make image-heavy notes very large. Keep this off for large documents so Obsidian opens quickly; turn it on only when you need a complete image copy. Around 30 images can become very slow; 50 or more may make the note impossible to open in Obsidian."
+	},
 	"folder": {
 		"message": "Folder"
 	},
