@@ -10,7 +10,7 @@ import { saveFile } from './utils/file-utils';
 import { debugLog } from './utils/debug';
 import { extractBilibiliStructuredContent, isBilibiliVideoUrl } from './platforms/bilibili/extractor';
 import { extractFeishuStructuredContent, isFeishuDocUrl } from './platforms/feishu/extractor';
-import { applyGitHubReadmeFallback, normalizeGitHubReadmeImages } from './platforms/github/extractor';
+import { applyGitHubReadmeFallback, inlineGitHubReadmeImages, normalizeGitHubReadmeImages } from './platforms/github/extractor';
 import { applyWeChatContentFallback, normalizeLazyImages } from './platforms/wechat/extractor';
 
 declare global {
@@ -326,6 +326,7 @@ declare global {
 			// Flatten shadow DOM before extraction (async, needs main world)
 			const flattenTimeout = new Promise<void>(resolve => setTimeout(resolve, 3000));
 			Promise.race([flattenShadowDom(document), flattenTimeout]).then(async () => {
+				await loadSettings();
 				normalizeLazyImages(document, document.URL || location.href);
 				normalizeGitHubReadmeImages(document, document.URL || location.href);
 
@@ -350,6 +351,12 @@ declare global {
 					.catch(() => defuddle.parse());
 				defuddled = applyWeChatContentFallback(document, defuddled, document.URL || location.href);
 				defuddled = applyGitHubReadmeFallback(document, defuddled, document.URL || location.href);
+				if (generalSettings.feishuDownloadImages) {
+					defuddled = {
+						...defuddled,
+						content: await inlineGitHubReadmeImages(defuddled.content, document.URL || location.href),
+					};
+				}
 				const bilibiliContent = isBilibiliVideoUrl(document.URL)
 					? await extractBilibiliStructuredContent(document).catch((error) => {
 						console.warn('Failed to extract Bilibili structured content:', error);

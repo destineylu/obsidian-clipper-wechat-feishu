@@ -62,6 +62,99 @@ function countImages(html: string | undefined): number {
 	return html?.match(/<img\b/gi)?.length || 0;
 }
 
+function isGitHubReadmeInlineCandidate(value: string, pageUrl: string): boolean {
+	try {
+		const normalized = new URL(normalizeGitHubImageUrl(value, pageUrl));
+		return normalized.hostname === 'raw.githubusercontent.com';
+	} catch {
+		return false;
+	}
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => typeof reader.result === 'string'
+			? resolve(reader.result)
+			: reject(new Error('Unexpected FileReader result'));
+		reader.onerror = () => reject(reader.error || new Error('Failed to read image blob'));
+		reader.readAsDataURL(blob);
+	});
+}
+
+async function fetchImageAsDataUrl(url: string, maxBytes: number): Promise<{ dataUrl: string; size: number } | null> {
+	try {
+		const response = await fetch(url, { cache: 'force-cache' });
+		if (!response.ok) return null;
+		const contentType = response.headers.get('content-type') || 'image/jpeg';
+		if (!contentType.startsWith('image/')) return null;
+		const blob = await response.blob();
+		if (blob.size > maxBytes) return null;
+		const typedBlob = blob.type ? blob : new Blob([blob], { type: contentType });
+		const dataUrl = await blobToDataUrl(typedBlob);
+		return { dataUrl, size: blob.size };
+	} catch (error) {
+		console.warn('[GitHub Clipper] Failed to inline README image:', url, error);
+		return null;
+	}
+}
+
+export async function inlineGitHubReadmeImages(
+	content: string,
+	pageUrl: string,
+	options: { maxImageBytes?: number; maxTotalBytes?: number; concurrency?: number } = {}
+): Promise<string> {
+	if (!isGitHubMarkdownUrl(pageUrl) || !content.includes('<img')) return content;
+
+	const maxImageBytes = options.maxImageBytes ?? 8 * 1024 * 1024;
+	const maxTotalBytes = options.maxTotalBytes ?? 120 * 1024 * 1024;
+	const concurrency = Math.max(1, options.concurrency ?? 4);
+	const parser = new DOMParser();
+	const doc = parser.parseFromString(content, 'text/html');
+	const images = Array.from(doc.querySelectorAll('img'));
+	const urls = Array.from(new Set(images
+		.map(img => img.getAttribute('src') || '')
+		.filter(src => src && isGitHubReadmeInlineCandidate(src, pageUrl))
+		.map(src => normalizeGitHubImageUrl(src, pageUrl))));
+
+	const dataUrls = new Map<string, string>();
+	let totalBytes = 0;
+	let nextIndex = 0;
+
+	await Promise.all(Array.from({ length: Math.min(concurrency, urls.length) }, async () => {
+		while (totalBytes < maxTotalBytes) {
+			const url = urls[nextIndex++];
+			if (!url) return;
+			const result = await fetchImageAsDataUrl(url, maxImageBytes);
+			if (!result || totalBytes + result.size > maxTotalBytes) continue;
+			totalBytes += result.size;
+			dataUrls.set(url, result.dataUrl);
+		}
+	}));
+
+	for (const img of images) {
+		const src = img.getAttribute('src');
+		if (!src) continue;
+		const normalized = normalizeGitHubImageUrl(src, pageUrl);
+		const dataUrl = dataUrls.get(normalized);
+		if (!dataUrl) {
+			img.setAttribute('src', normalized);
+			continue;
+		}
+		img.setAttribute('src', dataUrl);
+		img.removeAttribute('srcset');
+	}
+
+	console.log('[GitHub Clipper] Inlined README images:', {
+		pageUrl,
+		candidateCount: urls.length,
+		inlinedCount: dataUrls.size,
+		totalBytes,
+	});
+
+	return doc.body.innerHTML;
+}
+
 export function applyGitHubReadmeFallback<T extends { content?: string }>(
 	doc: Document,
 	parsed: T,
