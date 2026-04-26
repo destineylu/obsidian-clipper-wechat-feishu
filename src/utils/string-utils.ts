@@ -18,6 +18,8 @@ export function escapeDoubleQuotes(str: string): string {
 	return str.replace(/"/g, '\\"');
 }
 
+const MAX_SAFE_FILE_NAME_LENGTH = 120;
+
 export function sanitizeFileName(fileName: string): string {
 	const platform = (navigator as any).userAgentData?.platform || navigator.platform || '';
 	const isWindows = /win/i.test(platform);
@@ -46,7 +48,8 @@ export function sanitizeFileName(fileName: string): string {
 	sanitized = sanitized
 		.replace(/^\.+/, '') // Remove leading periods
 		.trim()
-		.slice(0, 245); // Trim to 245 characters, leaving room to append ' 1.md'
+		.slice(0, MAX_SAFE_FILE_NAME_LENGTH)
+		.replace(/[\s.]+$/, ''); // Keep generated attachment paths comfortably below OS limits.
 
 	// Ensure the file name is not empty
 	if (sanitized.length === 0) {
