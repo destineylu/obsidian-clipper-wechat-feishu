@@ -669,7 +669,7 @@ function clearError(): void {
 
 	if (errorMessage && clipper) {
 		errorMessage.style.display = 'none';
-		clipper.style.display = 'block';
+		clipper.style.display = '';
 
 		document.body.classList.remove('has-error');
 	}
