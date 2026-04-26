@@ -147,6 +147,15 @@ function getFeishuImageWarningMarkdown(imageCount: number): string {
 	].join('\n');
 }
 
+function getFeishuFileFallbackMarkdown(fileCount: number): string {
+	if (!fileCount) return '';
+	return [
+		'> [!info] 飞书视频和附件',
+		`> 本文档包含约 ${fileCount} 个飞书视频或附件。为避免笔记体积过大，插件会在剪藏结果中保留可点击入口，而不是直接内联到 Markdown。`,
+		'',
+	].join('\n');
+}
+
 interface ContentResponse {
 	content: string;
 	selectedHtml: string;
@@ -281,8 +290,14 @@ export async function initializePageContent(
 		const markdownBody = isFeishu
 			? mergeFeishuMarkdownAndVideoHtml(content, currentUrl)
 			: createMarkdownContent(content, currentUrl);
-		const finalMarkdownBody = isFeishu && generalSettings.feishuDownloadImages
-			? `${getFeishuImageWarningMarkdown(feishuPlaceholderSummary.imagePlaceholderCount)}${markdownBody}`
+		const feishuMediaNote = isFeishu
+			? [
+				generalSettings.feishuDownloadImages ? getFeishuImageWarningMarkdown(feishuPlaceholderSummary.imagePlaceholderCount) : '',
+				getFeishuFileFallbackMarkdown(feishuPlaceholderSummary.filePlaceholderCount),
+			].join('')
+			: '';
+		const finalMarkdownBody = feishuMediaNote
+			? `${feishuMediaNote}${markdownBody}`
 			: markdownBody;
 		if (isFeishu) {
 			const finalPlaceholderSummary = getFeishuMediaPlaceholderSummary(content);
