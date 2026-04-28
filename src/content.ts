@@ -8,10 +8,7 @@ import { createMarkdownContent } from 'defuddle/full';
 import { flattenShadowDom } from './utils/flatten-shadow-dom';
 import { saveFile } from './utils/file-utils';
 import { debugLog } from './utils/debug';
-import { extractBilibiliStructuredContent, isBilibiliVideoUrl } from './platforms/bilibili/extractor';
-import { extractFeishuStructuredContent, isFeishuDocUrl } from './platforms/feishu/extractor';
-import { applyGitHubReadmeFallback, inlineGitHubReadmeImages, normalizeGitHubReadmeImages } from './platforms/github/extractor';
-import { applyWeChatContentFallback, normalizeLazyImages } from './platforms/wechat/extractor';
+import { platformRegistry } from './platforms';
 
 declare global {
 	interface Window {
@@ -33,29 +30,20 @@ declare global {
 	// In Reader mode, extract from the article's original HTML (before
 	// wireTranscript restructures it) with a neutral URL so site-specific
 	// extractors don't re-fetch content (e.g. YouTube)
-	function parseForClip(doc: Document) {
+	async function parseForClip(doc: Document) {
+		const url = doc.URL || location.href;
 		const readerArticle = doc.querySelector('.obsidian-reader-active .obsidian-reader-content article');
 		if (readerArticle) {
 			const readerDoc = doc.implementation.createHTMLDocument();
 			const originalHtml = readerArticle.getAttribute('data-original-html');
 			readerDoc.body.innerHTML = originalHtml || readerArticle.innerHTML;
-			normalizeLazyImages(readerDoc, doc.URL || location.href);
-			normalizeGitHubReadmeImages(readerDoc, doc.URL || location.href);
+			await platformRegistry.beforeDomNormalize({ document: readerDoc, url });
 			const parsed = new Defuddle(readerDoc, { url: '' }).parse();
-			return applyGitHubReadmeFallback(
-				readerDoc,
-				applyWeChatContentFallback(readerDoc, parsed, doc.URL || location.href),
-				doc.URL || location.href
-			);
+			return platformRegistry.afterExtract({ document: readerDoc, parsed, url });
 		}
-		normalizeLazyImages(doc, doc.URL || location.href);
-		normalizeGitHubReadmeImages(doc, doc.URL || location.href);
+		await platformRegistry.beforeDomNormalize({ document: doc, url });
 		const parsed = new Defuddle(doc, { url: doc.URL }).parse();
-		return applyGitHubReadmeFallback(
-			doc,
-			applyWeChatContentFallback(doc, parsed, doc.URL || location.href),
-			doc.URL || location.href
-		);
+		return platformRegistry.afterExtract({ document: doc, parsed, url });
 	}
 
 	let isHighlighterMode = false;
@@ -277,9 +265,9 @@ declare global {
 		}
 
 		if (request.action === "copyMarkdownToClipboard") {
-			flattenShadowDom(document).then(() => {
+			flattenShadowDom(document).then(async () => {
 				try {
-					const defuddled = parseForClip(document);
+					const defuddled = await parseForClip(document);
 
 					// Convert HTML content to markdown
 					const markdown = createMarkdownContent(defuddled.content, document.URL);
@@ -304,7 +292,7 @@ declare global {
 		if (request.action === "saveMarkdownToFile") {
 			flattenShadowDom(document).then(async () => {
 				try {
-					const defuddled = parseForClip(document);
+					const defuddled = await parseForClip(document);
 					const markdown = createMarkdownContent(defuddled.content, document.URL);
 					const title = defuddled.title || document.title || 'Untitled';
 					const fileName = title.replace(/[/\\?%*:|"<>]/g, '-');
@@ -327,8 +315,7 @@ declare global {
 			const flattenTimeout = new Promise<void>(resolve => setTimeout(resolve, 3000));
 			Promise.race([flattenShadowDom(document), flattenTimeout]).then(async () => {
 				await loadSettings();
-				normalizeLazyImages(document, document.URL || location.href);
-				normalizeGitHubReadmeImages(document, document.URL || location.href);
+				await platformRegistry.beforeDomNormalize({ document, url: document.URL || location.href });
 
 				let selectedHtml = '';
 				const selection = window.getSelection();
@@ -349,39 +336,12 @@ declare global {
 				);
 				let defuddled = await Promise.race([defuddle.parseAsync(), parseTimeout])
 					.catch(() => defuddle.parse());
-				defuddled = applyWeChatContentFallback(document, defuddled, document.URL || location.href);
-				defuddled = applyGitHubReadmeFallback(document, defuddled, document.URL || location.href);
-				if (generalSettings.feishuDownloadImages) {
-					defuddled = {
-						...defuddled,
-						content: await inlineGitHubReadmeImages(defuddled.content, document.URL || location.href),
-					};
-				}
-				const bilibiliContent = isBilibiliVideoUrl(document.URL)
-					? await extractBilibiliStructuredContent(document).catch((error) => {
-						console.warn('Failed to extract Bilibili structured content:', error);
-						return null;
-					})
-					: null;
-				const feishuContent = isFeishuDocUrl(document.URL)
-					? await extractFeishuStructuredContent(document).catch((error) => {
-						console.warn('Failed to extract Feishu structured content:', error);
-						return null;
-					})
-					: null;
+				defuddled = await platformRegistry.afterExtract({ document, parsed: defuddled, url: document.URL || location.href });
+				const platformContent = await platformRegistry.extractStructuredContent({ document, url: document.URL || location.href });
 				const extractedContent: { [key: string]: string } = {
 					...defuddled.variables,
+					...(platformContent?.variables || {}),
 				};
-
-				if (bilibiliContent) {
-					extractedContent.transcript = bilibiliContent.transcriptMarkdown;
-					extractedContent.transcriptMarkdown = bilibiliContent.transcriptMarkdown;
-					extractedContent.transcriptText = bilibiliContent.transcriptText;
-					extractedContent.chapters = bilibiliContent.chaptersMarkdown;
-					extractedContent.bvid = bilibiliContent.bvid;
-					extractedContent.cid = String(bilibiliContent.cid);
-					extractedContent.page = String(bilibiliContent.page);
-				}
 
 				// Create a new DOMParser
 				const parser = new DOMParser();
@@ -426,23 +386,23 @@ declare global {
 				const cleanedHtml = doc.documentElement.outerHTML;
 
 			const response: ContentResponse = {
-				author: bilibiliContent?.author || feishuContent?.author || defuddled.author,
-				content: bilibiliContent?.structuredHtml || feishuContent?.content || defuddled.content,
-				description: bilibiliContent?.description || defuddled.description,
+				author: platformContent?.author || defuddled.author,
+				content: platformContent?.content || defuddled.content,
+				description: platformContent?.description || defuddled.description,
 				domain: getDomain(document.URL),
 				extractedContent: extractedContent,
 				favicon: defuddled.favicon,
 				fullHtml: cleanedHtml,
 				highlights: highlighter.getHighlights(),
-				image: bilibiliContent?.image || defuddled.image,
+				image: platformContent?.image || defuddled.image,
 				language: defuddled.language || '',
 				parseTime: defuddled.parseTime,
-				published: bilibiliContent?.published || defuddled.published,
+				published: platformContent?.published || defuddled.published,
 				schemaOrgData: defuddled.schemaOrgData,
 				selectedHtml: selectedHtml,
-				site: bilibiliContent ? 'Bilibili' : feishuContent ? 'Feishu' : defuddled.site,
-				title: bilibiliContent?.title || feishuContent?.title || defuddled.title,
-				wordCount: bilibiliContent?.wordCount || feishuContent?.wordCount || defuddled.wordCount,
+				site: platformContent?.site || defuddled.site,
+				title: platformContent?.title || defuddled.title,
+				wordCount: platformContent?.wordCount || defuddled.wordCount,
 				metaTags: defuddled.metaTags || []
 			};
 				sendResponse(response);

@@ -11,7 +11,6 @@ export const generalSettings: Settings = {
 	betaFeatures: false,
 	legacyMode: false,
 	silentOpen: false,
-	feishuDownloadImages: false,
 	openBehavior: 'popup',
 	highlighterEnabled: false,
 	alwaysShowHighlights: false,

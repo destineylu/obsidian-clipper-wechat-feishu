@@ -8,23 +8,19 @@ const directExtractorPattern = /from\s+['"][^'"]*(feishu-extractor|bilibili-extr
 const requiredHooks = [
 	{
 		file: path.join(srcDir, 'content.ts'),
-		importPath: './platforms/wechat/extractor',
-	},
-	{
-		file: path.join(srcDir, 'content.ts'),
-		importPath: './platforms/feishu/extractor',
-	},
-	{
-		file: path.join(srcDir, 'content.ts'),
-		importPath: './platforms/bilibili/extractor',
+		importPath: './platforms',
 	},
 	{
 		file: path.join(srcDir, 'utils', 'content-extractor.ts'),
-		importPath: '../platforms/feishu/extractor',
+		importPath: '../platforms',
 	},
 	{
 		file: path.join(srcDir, 'utils', 'reader.ts'),
-		importPath: '../platforms/bilibili/extractor',
+		importPath: '../platforms',
+	},
+	{
+		file: path.join(srcDir, 'background.ts'),
+		importPath: './platforms',
 	},
 ];
 

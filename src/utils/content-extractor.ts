@@ -1,13 +1,13 @@
 import { ExtractedContent } from '../types/types';
 import { createMarkdownContent } from 'defuddle/full';
-import { sanitizeFileName, escapeHtml } from './string-utils';
+import { sanitizeFileName } from './string-utils';
 import { buildVariables, addSchemaOrgDataToVariables } from './shared';
 import browser from './browser-polyfill';
 import { debugLog } from './debug';
 import dayjs from 'dayjs';
 import { AnyHighlightData, TextHighlightData, HighlightData } from './highlighter';
 import { generalSettings } from './storage-utils';
-import { buildFeishuMediaDownloadLinks, isFeishuDocUrl, inlineFeishuMediaPlaceholders } from '../platforms/feishu/extractor';
+import { platformRegistry } from '../platforms';
 import {
 	getElementByXPath,
 	wrapElementWithMark,
@@ -38,122 +38,6 @@ function stripHtml(html: string): string {
 	const parser = new DOMParser();
 	const doc = parser.parseFromString(html, 'text/html');
 	return doc.body.textContent || '';
-}
-
-function buildFeishuVideoBlockPlaceholder(index: number): string {
-	return `FEISHUVIDEOBLOCK${index}TOKEN`;
-}
-
-function cleanFeishuMediaTitle(title: string | undefined, token: string): string {
-	if (!title) return '';
-	return title
-		.replace(new RegExp(token, 'g'), '')
-		.replace(/[（）()【】\[\]\s]+$/g, '')
-		.trim();
-}
-
-function createFeishuMediaFallback(
-	label: string,
-	token: string,
-	currentUrl: string,
-	downloadKind: 'image' | 'file',
-	displayKind: 'image' | 'video',
-	title?: string
-): string {
-	const normalizedTitle = cleanFeishuMediaTitle(title, token);
-	const fallbackLabel = normalizedTitle ? `${label}：${normalizedTitle}` : label;
-	const downloadLinks = buildFeishuMediaDownloadLinks(currentUrl, token, downloadKind);
-	const mediaUrl = browser.runtime.getURL(
-		`feishu-media.html?kind=${displayKind}&name=${encodeURIComponent(fallbackLabel)}&urls=${encodeURIComponent(JSON.stringify(downloadLinks))}`
-	);
-	return `<a href="${escapeHtml(mediaUrl)}">${escapeHtml(fallbackLabel)}</a>`;
-}
-
-function replaceUnresolvedFeishuMediaWithFallbacks(content: string, currentUrl: string): string {
-	return content
-		.replace(/<figure[^>]*>\s*<img[^>]*src="feishu-image:\/\/([\w-]+)"[^>]*alt="([^"]*)"[^>]*>\s*<\/figure>/gi, (_, token: string, alt: string) => {
-			return `<p>${createFeishuMediaFallback('Feishu图片未内联', token, currentUrl, 'image', 'image', alt)}</p>`;
-		})
-		.replace(/<figure[^>]*>\s*<img[^>]*src="feishu-file:\/\/([\w-]+)"[^>]*alt="([^"]*)"[^>]*>\s*<\/figure>/gi, (_, token: string, alt: string) => {
-			return `<p>${createFeishuMediaFallback('Feishu图片附件未内联', token, currentUrl, 'file', 'image', alt)}</p>`;
-		})
-		.replace(/<figure[^>]*>\s*<video[^>]*src="feishu-file:\/\/([\w-]+)"[^>]*><\/video>(?:\s*<figcaption>([\s\S]*?)<\/figcaption>)?\s*<\/figure>/gi, (_, token: string, caption: string) => {
-			const plainCaption = stripHtml(caption || '');
-			return `<p>${createFeishuMediaFallback('Feishu视频未内联', token, currentUrl, 'file', 'video', plainCaption)}</p>`;
-		})
-		.replace(/<p><a href="feishu-file:\/\/([\w-]+)">([\s\S]*?)<\/a><\/p>/gi, (_, token: string, text: string) => {
-			const plainText = stripHtml(text || '');
-			return `<p><a href="${escapeHtml(currentUrl)}">${escapeHtml(cleanFeishuMediaTitle(plainText, token) || 'Feishu附件未内联')}</a></p>`;
-		});
-}
-
-function mergeFeishuMarkdownAndVideoHtml(content: string, currentUrl: string): string {
-	const contentWithFallbacks = replaceUnresolvedFeishuMediaWithFallbacks(content, currentUrl);
-	const videoPattern = /<figure[^>]*>\s*<video[\s\S]*?<\/video>(?:[\s\S]*?<figcaption>[\s\S]*?<\/figcaption>)?\s*<\/figure>/gi;
-	const videoBlocks = Array.from(contentWithFallbacks.matchAll(videoPattern), match => match[0]);
-	let htmlWithoutVideos = contentWithFallbacks;
-
-	videoBlocks.forEach((block, index) => {
-		htmlWithoutVideos = htmlWithoutVideos.replace(block, `\n\n${buildFeishuVideoBlockPlaceholder(index)}\n\n`);
-	});
-
-	let markdownBody = createMarkdownContent(htmlWithoutVideos, currentUrl);
-	videoBlocks.forEach((block, index) => {
-		markdownBody = markdownBody.replace(buildFeishuVideoBlockPlaceholder(index), block);
-	});
-
-	return markdownBody;
-}
-
-const MAX_FEISHU_INLINE_CONCURRENCY = 2;
-const FEISHU_IMAGE_SLOW_WARNING_THRESHOLD = 30;
-const FEISHU_IMAGE_UNOPENABLE_WARNING_THRESHOLD = 50;
-
-type FeishuMediaInliningPolicy = 'inline' | 'skip';
-
-function getMatchCount(content: string, pattern: RegExp): number {
-	return content.match(pattern)?.length || 0;
-}
-
-function getFeishuMediaPlaceholderSummary(content: string): {
-	imagePlaceholderCount: number;
-	filePlaceholderCount: number;
-	totalPlaceholderCount: number;
-} {
-	const imagePlaceholderCount = getMatchCount(content, /feishu-image:\/\//gi);
-	const filePlaceholderCount = getMatchCount(content, /feishu-file:\/\//gi);
-	return {
-		imagePlaceholderCount,
-		filePlaceholderCount,
-		totalPlaceholderCount: imagePlaceholderCount + filePlaceholderCount,
-	};
-}
-
-function getFeishuMediaInliningPolicy(content: string, downloadImages: boolean): FeishuMediaInliningPolicy {
-	const { totalPlaceholderCount } = getFeishuMediaPlaceholderSummary(content);
-	if (!totalPlaceholderCount) return 'inline';
-	return downloadImages ? 'inline' : 'skip';
-}
-
-function getFeishuImageWarningMarkdown(imageCount: number): string {
-	if (imageCount < FEISHU_IMAGE_SLOW_WARNING_THRESHOLD) return '';
-	const severity = imageCount >= FEISHU_IMAGE_UNOPENABLE_WARNING_THRESHOLD
-		? '有可能导致 Obsidian 无法打开该笔记'
-		: '可能导致 Obsidian 打开速度极慢';
-	return [
-		'> [!warning] 飞书图片数量较多',
-		`> 本文档包含约 ${imageCount} 张飞书图片，${severity}。如果出现卡死，请在剪藏器设置中关闭“下载图片”，重新剪藏为图片链接。`,
-		'',
-	].join('\n');
-}
-
-function getFeishuFileFallbackMarkdown(fileCount: number): string {
-	if (!fileCount) return '';
-	return [
-		'> [!info] 飞书视频和附件',
-		`> 本文档包含约 ${fileCount} 个飞书视频或附件。为避免笔记体积过大，插件会在剪藏结果中保留可点击入口，而不是直接内联到 Markdown。`,
-		'',
-	].join('\n');
 }
 
 interface ContentResponse {
@@ -270,50 +154,21 @@ export async function initializePageContent(
 			content = processHighlights(content, highlights);
 		}
 
-		const isFeishu = isFeishuDocUrl(currentUrl);
-		const feishuPlaceholderSummary = isFeishu
-			? getFeishuMediaPlaceholderSummary(content)
-			: { imagePlaceholderCount: 0, filePlaceholderCount: 0, totalPlaceholderCount: 0 };
-		const feishuMediaInliningPolicy = isFeishu
-			? getFeishuMediaInliningPolicy(content, generalSettings.feishuDownloadImages)
-			: 'inline';
-
-		if (isFeishu && feishuPlaceholderSummary.totalPlaceholderCount > 0) {
-			if (feishuMediaInliningPolicy === 'inline') {
-				content = await inlineFeishuMediaPlaceholders(content, currentUrl, {
-					maxFiles: 0,
-					concurrency: MAX_FEISHU_INLINE_CONCURRENCY,
-				});
-			}
-		}
-
-		const markdownBody = isFeishu
-			? mergeFeishuMarkdownAndVideoHtml(content, currentUrl)
-			: createMarkdownContent(content, currentUrl);
-		const feishuMediaNote = isFeishu
-			? [
-				generalSettings.feishuDownloadImages ? getFeishuImageWarningMarkdown(feishuPlaceholderSummary.imagePlaceholderCount) : '',
-				getFeishuFileFallbackMarkdown(feishuPlaceholderSummary.filePlaceholderCount),
-			].join('')
-			: '';
-		const finalMarkdownBody = feishuMediaNote
-			? `${feishuMediaNote}${markdownBody}`
+		const platformMarkdown = await platformRegistry.afterMarkdown({ content, currentUrl });
+		content = platformMarkdown.content;
+		const markdownBody = platformMarkdown.markdownBody || createMarkdownContent(content, currentUrl);
+		const finalMarkdownBody = platformMarkdown.prefixMarkdown
+			? `${platformMarkdown.prefixMarkdown}${markdownBody}`
 			: markdownBody;
-		if (isFeishu) {
-			const finalPlaceholderSummary = getFeishuMediaPlaceholderSummary(content);
-			console.log('[Feishu Clipper] Final content variable summary:', {
+		if (platformMarkdown.debugInfo) {
+			console.log('[Platform Clipper] Final content variable summary:', {
 				url: currentUrl,
 				contentLength: content.length,
 				markdownBodyLength: finalMarkdownBody.length,
 				imgCount: (content.match(/<img\b/gi) || []).length,
 				videoCount: (content.match(/<video\b/gi) || []).length,
-				initialImagePlaceholderCount: feishuPlaceholderSummary.imagePlaceholderCount,
-				initialFilePlaceholderCount: feishuPlaceholderSummary.filePlaceholderCount,
-				finalImagePlaceholderCount: finalPlaceholderSummary.imagePlaceholderCount,
-				finalFilePlaceholderCount: finalPlaceholderSummary.filePlaceholderCount,
-				feishuMediaInliningPolicy,
-				feishuDownloadImages: generalSettings.feishuDownloadImages,
 				usingStructuredHtmlAsContent: false,
+				...platformMarkdown.debugInfo,
 			});
 		}
 

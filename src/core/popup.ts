@@ -35,10 +35,12 @@ let templates: Template[] = [];
 let currentVariables: { [key: string]: string } = {};
 let currentTabId: number | undefined;
 let lastSelectedVault: string | null = null;
+let largeNoteContentValue: string | null = null;
 
 const isSidePanel = window.location.pathname.includes('side-panel.html');
 const urlParams = new URLSearchParams(window.location.search);
 const isIframe = urlParams.get('context') === 'iframe';
+const LARGE_NOTE_CONTENT_PREVIEW_THRESHOLD = 2_000_000;
 
 function hashString(value: string): string {
 	let hash = 5381;
@@ -62,7 +64,7 @@ function countLinkedImages(content: string): number {
 }
 
 function countMediaLinks(content: string): number {
-	return (content.match(/微信视频|微信音频|Feishu视频|飞书视频|视频未内联|音频未内联/g) || []).length;
+	return (content.match(/微信视频|微信音频|Feishu视频|飞书视频|X视频|视频未内联|音频未内联/g) || []).length;
 }
 
 function updateNoteContentStatus(content: string): void {
@@ -86,6 +88,42 @@ function updateNoteContentStatus(content: string): void {
 		parts.push(`${numberFormatter.format(mediaCount)} 个媒体链接`);
 	}
 	status.textContent = parts.join(' · ');
+}
+
+function shouldUseLargeContentPreview(content: string): boolean {
+	return content.length > LARGE_NOTE_CONTENT_PREVIEW_THRESHOLD && content.includes('data:image/');
+}
+
+function createLargeContentPreview(content: string): string {
+	const preview = content.replace(/!\[([^\]]*)\]\(data:image\/[^)]+\)/g, (_, alt: string) => {
+		return `![${alt || '已内联图片'}](完整图片已保存在剪藏内容中)`;
+	});
+	return [
+		'> [!info] 大图片内容预览已精简',
+		'> 本次剪藏包含较大的内联图片。为避免弹窗卡死，这里显示轻量预览；点击 Add to Obsidian、复制或保存时仍会使用完整内容。',
+		'',
+		preview,
+	].join('\n');
+}
+
+function setNoteContentFieldValue(noteContentField: HTMLTextAreaElement, content: string): void {
+	if (shouldUseLargeContentPreview(content)) {
+		largeNoteContentValue = content;
+		noteContentField.dataset.largeContentPreview = 'true';
+		noteContentField.value = createLargeContentPreview(content);
+		updateNoteContentStatus(content);
+		return;
+	}
+
+	largeNoteContentValue = null;
+	delete noteContentField.dataset.largeContentPreview;
+	noteContentField.value = content;
+	updateNoteContentStatus(content);
+}
+
+function getNoteContentForSave(): string {
+	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement | null;
+	return largeNoteContentValue ?? noteContentField?.value ?? '';
 }
 
 // Memoize compileTemplate with a short expiration and variable-sensitive key
@@ -468,7 +506,13 @@ function setupEventListeners(tabId: number) {
 
 	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 	if (noteContentField) {
-		noteContentField.addEventListener('input', () => updateNoteContentStatus(noteContentField.value));
+		noteContentField.addEventListener('input', () => {
+			if (noteContentField.dataset.largeContentPreview === 'true') {
+				largeNoteContentValue = null;
+				delete noteContentField.dataset.largeContentPreview;
+			}
+			updateNoteContentStatus(noteContentField.value);
+		});
 	}
 
 	const highlighterModeButton = document.getElementById('highlighter-mode');
@@ -512,9 +556,8 @@ function setupEventListeners(tabId: number) {
 		copyContentButton.addEventListener('click', async () => {
 			const properties = getPropertiesFromDOM();
 
-			const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 			const frontmatter = await generateFrontmatter(properties);
-			const fileContent = frontmatter + noteContentField.value;
+			const fileContent = frontmatter + getNoteContentForSave();
 			
 			await copyToClipboard(fileContent);
 		});
@@ -530,13 +573,11 @@ function setupEventListeners(tabId: number) {
 			button.addEventListener('click', async (e) => {
 				// Get content synchronously
 				const properties = getPropertiesFromDOM();
-
-				const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 				
 				// Use Promise.all to prepare the data
 				Promise.all([
 					generateFrontmatter(properties),
-					Promise.resolve(noteContentField.value)
+					Promise.resolve(getNoteContentForSave())
 				]).then(([frontmatter, noteContent]) => {
 					const fileContent = frontmatter + noteContent;
 					
@@ -983,8 +1024,7 @@ async function fillTemplateFieldValues(currentTabId: number, template: Template 
 
 	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 	if (noteContentField) {
-		noteContentField.value = template.noteContentFormat ? formattedContent : '';
-		updateNoteContentStatus(noteContentField.value);
+		setNoteContentFieldValue(noteContentField, template.noteContentFormat ? formattedContent : '');
 	}
 
 	if (generalSettings.interpreterEnabled) {
@@ -1291,9 +1331,8 @@ async function handleSaveToDownloads() {
 		
 		const properties = getPropertiesFromDOM();
 
-		const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 		const frontmatter = await generateFrontmatter(properties);
-		const fileContent = frontmatter + noteContentField.value;
+		const fileContent = frontmatter + getNoteContentForSave();
 
 		await saveFile({
 			content: fileContent,
@@ -1379,7 +1418,7 @@ async function handleClipObsidian(): Promise<void> {
 		const properties = getPropertiesFromDOM();
 
 		const frontmatter = await generateFrontmatter(properties);
-		const fileContent = frontmatter + noteContentField.value;
+		const fileContent = frontmatter + getNoteContentForSave();
 
 		// Save to Obsidian
 		const selectedVault = currentTemplate.vault || vaultDropdown.value;
@@ -1445,9 +1484,8 @@ function getActionIcon(actionType: string): string {
 async function copyContent() {
 	const properties = getPropertiesFromDOM();
 
-	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
 	const frontmatter = await generateFrontmatter(properties);
-	const fileContent = frontmatter + noteContentField.value;
+	const fileContent = frontmatter + getNoteContentForSave();
 	await copyToClipboard(fileContent);
 }
 

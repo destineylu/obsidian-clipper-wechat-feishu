@@ -18,6 +18,7 @@ import { getClipHistory } from '../utils/storage-utils';
 import dayjs from 'dayjs';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
 import { showModal, hideModal } from '../utils/modal-utils';
+import { loadPlatformSettings, savePlatformSettings } from '../platforms/settings';
 
 dayjs.extend(weekOfYear);
 
@@ -255,7 +256,6 @@ function saveSettingsFromForm(): void {
 	const betaFeaturesToggle = document.getElementById('beta-features-toggle') as HTMLInputElement;
 	const legacyModeToggle = document.getElementById('legacy-mode-toggle') as HTMLInputElement;
 	const silentOpenToggle = document.getElementById('silent-open-toggle') as HTMLInputElement;
-	const feishuDownloadImagesToggle = document.getElementById('feishu-download-images-toggle') as HTMLInputElement;
 	const highlighterToggle = document.getElementById('highlighter-toggle') as HTMLInputElement;
 	const alwaysShowHighlightsToggle = document.getElementById('highlighter-visibility') as HTMLInputElement;
 	const highlightBehaviorSelect = document.getElementById('highlighter-behavior') as HTMLSelectElement;
@@ -267,7 +267,6 @@ function saveSettingsFromForm(): void {
 		betaFeatures: betaFeaturesToggle?.checked ?? generalSettings.betaFeatures,
 		legacyMode: legacyModeToggle?.checked ?? generalSettings.legacyMode,
 		silentOpen: silentOpenToggle?.checked ?? generalSettings.silentOpen,
-		feishuDownloadImages: feishuDownloadImagesToggle?.checked ?? generalSettings.feishuDownloadImages,
 		highlighterEnabled: highlighterToggle?.checked ?? generalSettings.highlighterEnabled,
 		alwaysShowHighlights: alwaysShowHighlightsToggle?.checked ?? generalSettings.alwaysShowHighlights,
 		highlightBehavior: highlightBehaviorSelect?.value ?? generalSettings.highlightBehavior
@@ -349,8 +348,15 @@ function initializeSilentOpenToggle(): void {
 }
 
 function initializeFeishuDownloadImagesToggle(): void {
-	initializeSettingToggle('feishu-download-images-toggle', generalSettings.feishuDownloadImages, (checked) => {
-		saveSettings({ ...generalSettings, feishuDownloadImages: checked });
+	loadPlatformSettings().then((platformSettings) => {
+		initializeSettingToggle('feishu-download-images-toggle', platformSettings.feishu.downloadImages, (checked) => {
+			savePlatformSettings({
+				feishu: {
+					...platformSettings.feishu,
+					downloadImages: checked,
+				},
+			});
+		});
 	});
 }
 
