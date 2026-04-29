@@ -1,5 +1,7 @@
 import browser from '../utils/browser-polyfill';
 
+const GITHUB_MAX_SAFE_INLINE_TOTAL_BYTES = 40 * 1024 * 1024;
+
 export interface PlatformSettings {
 	feishu: {
 		downloadImages: boolean;
@@ -32,7 +34,7 @@ export const defaultPlatformSettings: PlatformSettings = {
 	github: {
 		inlineReadmeImages: false,
 		maxInlineImageBytes: 8 * 1024 * 1024,
-		maxInlineTotalBytes: 120 * 1024 * 1024,
+		maxInlineTotalBytes: GITHUB_MAX_SAFE_INLINE_TOTAL_BYTES,
 	},
 };
 
@@ -59,9 +61,10 @@ function mergePlatformSettings(raw: Partial<PlatformSettings> | undefined, legac
 	if (legacyDownloadImages !== undefined && raw?.feishu?.downloadImages === undefined) {
 		next.feishu.downloadImages = legacyDownloadImages;
 	}
-	if (legacyDownloadImages !== undefined && raw?.github?.inlineReadmeImages === undefined) {
-		next.github.inlineReadmeImages = legacyDownloadImages;
-	}
+	next.github.maxInlineTotalBytes = Math.min(
+		next.github.maxInlineTotalBytes,
+		GITHUB_MAX_SAFE_INLINE_TOTAL_BYTES
+	);
 
 	return next;
 }

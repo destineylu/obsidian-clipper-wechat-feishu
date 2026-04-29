@@ -17,10 +17,14 @@ interface XVideoCandidate {
 
 const X_STATUS_PATTERN = /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/i;
 const VIDEO_URL_PATTERN = /^https:\/\/video\.twimg\.com\/.+\.(?:mp4|m3u8)(?:[?#].*)?$/i;
+const SHOW_MORE_PATTERN = /\bshow more\b|\bread more\b|显示更多|查看更多|展开全文|展开更多|查看全部/i;
+const SHOW_MORE_EXCLUDE_PATTERN = /\bshow more repl(?:y|ies)\b|\breplies\b|\breply\b|\bcomments?\b|\bmore menu\b|回复|评论|更多菜单/i;
 
 export function isXStatusUrl(url: string): boolean {
 	return X_STATUS_PATTERN.test(url);
 }
+
+const wait = (durationMs: number) => new Promise(resolve => setTimeout(resolve, durationMs));
 
 function escapeHtml(value: string): string {
 	return value
@@ -32,6 +36,29 @@ function escapeHtml(value: string): string {
 
 function getTweetId(url: string): string | null {
 	return url.match(X_STATUS_PATTERN)?.[1] || null;
+}
+
+function normalizeXStatusUrl(value: string, baseUrl = 'https://x.com/'): string {
+	try {
+		const parsed = new URL(value, baseUrl);
+		const match = parsed.href.match(X_STATUS_PATTERN);
+		if (!match) return '';
+		const parts = parsed.pathname.split('/').filter(Boolean);
+		if (parts.length < 3 || parts[1] !== 'status') return '';
+		return `https://x.com/${parts[0]}/status/${match[1]}`;
+	} catch {
+		return '';
+	}
+}
+
+function getXStatusAuthor(url: string): string | null {
+	try {
+		const parsed = new URL(url);
+		const parts = parsed.pathname.split('/').filter(Boolean);
+		return parts.length >= 3 && parts[1] === 'status' ? parts[0].toLowerCase() : null;
+	} catch {
+		return null;
+	}
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -96,9 +123,16 @@ function normalizeVideoUrl(url: string): string {
 	}
 }
 
+function isPlayableXVideoUrl(url: string): boolean {
+	if (!VIDEO_URL_PATTERN.test(url)) return false;
+	return !/\/aud\//i.test(url);
+}
+
 function chooseBestVariant(variants: XVideoVariant[]): XVideoVariant | null {
 	const usable = variants
-		.filter(variant => variant.url && VIDEO_URL_PATTERN.test(variant.url))
+		.filter(variant => variant.url
+			&& variant.content_type !== 'audio/mp4'
+			&& isPlayableXVideoUrl(variant.url))
 		.sort((left, right) => {
 			const leftIsMp4 = left.content_type === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(left.url || '');
 			const rightIsMp4 = right.content_type === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(right.url || '');
@@ -206,7 +240,7 @@ function extractFromDom(): XVideoCandidate[] {
 		.map((video, index): XVideoCandidate | null => {
 			const source = video.currentSrc || video.src || video.querySelector('source')?.src || '';
 			if (!source || source.startsWith('blob:')) return null;
-			if (!VIDEO_URL_PATTERN.test(source)) return null;
+			if (!isPlayableXVideoUrl(source)) return null;
 			return {
 				id: source,
 				poster: video.poster || undefined,
@@ -220,7 +254,7 @@ function extractFromDom(): XVideoCandidate[] {
 function extractFromPerformance(): XVideoCandidate[] {
 	return performance.getEntriesByType('resource')
 		.map(entry => entry.name)
-		.filter(url => VIDEO_URL_PATTERN.test(url))
+		.filter(url => isPlayableXVideoUrl(url))
 		.filter(url => /\.mp4(?:[?#]|$)/i.test(url) || /\.m3u8(?:[?#]|$)/i.test(url))
 		.map((url): XVideoCandidate => {
 			const sizeMatch = url.match(/\/(\d+)x(\d+)\//);
@@ -266,6 +300,67 @@ async function extractFromMainWorld(url: string): Promise<XVideoCandidate | null
 	return response?.success ? response.candidate || null : null;
 }
 
+function getVisibleText(element: Element): string {
+	return [
+		(element as HTMLElement).innerText,
+		element.textContent,
+		element.getAttribute('aria-label'),
+		element.getAttribute('title'),
+	].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function getPrimaryTweetScope(doc: Document): Element {
+	const longform = doc.querySelector('[data-testid="longformRichTextComponent"]');
+	const mainTweet = longform?.closest('article')
+		|| doc.querySelector('main article')
+		|| doc.querySelector('article')
+		|| doc.body;
+	return mainTweet;
+}
+
+async function expandXPrimaryShowMore(doc: Document): Promise<number> {
+	const scope = getPrimaryTweetScope(doc);
+	let clickedCount = 0;
+
+	for (let round = 0; round < 3; round++) {
+		const controls = Array.from(scope.querySelectorAll<HTMLElement>(
+			'button, [role="button"], a[href]'
+		));
+		const target = controls.find((control) => {
+			const text = getVisibleText(control);
+			if (!SHOW_MORE_PATTERN.test(text)) return false;
+			if (SHOW_MORE_EXCLUDE_PATTERN.test(text)) return false;
+			return !control.closest('[aria-label*="Reply"], [aria-label*="reply"]');
+		});
+		if (!target) break;
+
+		target.click();
+		clickedCount++;
+		await wait(500);
+	}
+
+	return clickedCount;
+}
+
+export async function hydrateXMediaBeforeExtract(doc: Document): Promise<void> {
+	const win = doc.defaultView;
+	if (!win || !isXStatusUrl(doc.URL || win.location.href)) return;
+	if (!doc.querySelector('[data-testid="longformRichTextComponent"], article, video')) return;
+
+	const originalY = win.scrollY;
+	await expandXPrimaryShowMore(doc);
+	const maxSteps = doc.querySelector('[data-testid="longformRichTextComponent"]') ? 10 : 4;
+
+	for (let index = 0; index < maxSteps; index++) {
+		win.scrollBy(0, Math.max(400, Math.floor(win.innerHeight * 0.85)));
+		await wait(450);
+		if (index >= 3 && doc.querySelector('video')) break;
+	}
+
+	win.scrollTo(0, originalY);
+	await wait(100);
+}
+
 export async function extractXVideoCandidate(url: string): Promise<XVideoCandidate | null> {
 	const tweetId = getTweetId(url);
 	if (!tweetId) return null;
@@ -280,29 +375,112 @@ export async function extractXVideoCandidate(url: string): Promise<XVideoCandida
 	]);
 }
 
-export async function appendXVideoFallback(content: string, pageUrl: string): Promise<string> {
+export async function appendXVideoFallback(content: string, pageUrl: string, doc?: Document): Promise<string> {
 	const candidate = await extractXVideoCandidate(pageUrl);
-	if (!candidate || content.includes(candidate.url)) return content;
+	const contentWithBlobFallbacks = replaceXBlobVideos(content, pageUrl, candidate);
+	if (contentWithBlobFallbacks !== content) return contentWithBlobFallbacks;
+	let nextContent = content;
+	if (candidate && !nextContent.includes(candidate.url)) {
+		nextContent = insertXVideoSectionNearTweetMedia(nextContent, buildXVideoSection(candidate), pageUrl);
+	}
 
+	for (const threadUrl of collectThreadStatusUrls(content, pageUrl, doc)) {
+		if (threadUrl === pageUrl) continue;
+		const threadCandidate = await extractXVideoCandidate(threadUrl);
+		if (!threadCandidate || nextContent.includes(threadCandidate.url)) continue;
+		nextContent = insertXVideoSectionNearTweetMedia(nextContent, buildXVideoSection(threadCandidate), threadUrl);
+	}
+
+	if (nextContent !== content) {
+		console.log('[X Clipper] Added video fallback:', {
+			pageUrl,
+		});
+	}
+
+	return nextContent;
+}
+
+function collectThreadStatusUrls(content: string, pageUrl: string, doc?: Document): string[] {
+	const sourceAuthor = getXStatusAuthor(pageUrl);
+	const urls = Array.from(content.matchAll(/https:\/\/(?:x|twitter)\.com\/[^"'<>\s)]+\/status\/\d+/gi), match => {
+		return normalizeXStatusUrl(match[0], pageUrl);
+	}).filter(Boolean);
+
+	const domUrls = doc
+		? Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="/status/"]'))
+			.map(anchor => normalizeXStatusUrl(anchor.getAttribute('href') || anchor.href, pageUrl))
+			.filter(Boolean)
+		: [];
+
+	const ordered = [normalizeXStatusUrl(pageUrl), ...urls, ...domUrls].filter(Boolean);
+	const sameAuthor = ordered.filter(url => getXStatusAuthor(url) === sourceAuthor);
+	return Array.from(new Set(sameAuthor.length ? sameAuthor : ordered)).slice(0, 8);
+}
+
+function replaceXBlobVideos(content: string, pageUrl: string, candidate: XVideoCandidate | null): string {
+	const videoPattern = /<video\b[\s\S]*?<\/video>/gi;
+	let replacedCount = 0;
+	const nextContent = content.replace(videoPattern, (block) => {
+		if (!/blob:https?:\/\/(?:x|twitter)\.com/i.test(block)) return block;
+		const poster = block.match(/\bposter=["']([^"']+)["']/i)?.[1];
+		if (candidate?.url && !replacedCount) {
+			replacedCount++;
+			return buildXVideoSection(candidate);
+		}
+		if (!poster) return block;
+		replacedCount++;
+		return [
+			'<section data-obsidian-clipper-x-video="true">',
+			'<h2>X 视频</h2>',
+			`<p><a href="${escapeHtml(pageUrl)}">X视频：打开原文播放</a></p>`,
+			`<p><a href="${escapeHtml(pageUrl)}"><img src="${escapeHtml(poster)}" alt="X视频封面"></a></p>`,
+			'</section>',
+		].join('');
+	});
+
+	return replacedCount > 0 ? nextContent : content;
+}
+
+function buildXVideoSection(candidate: XVideoCandidate): string {
 	const lines = [
-		'<hr>',
 		'<section data-obsidian-clipper-x-video="true">',
 		'<h2>X 视频</h2>',
+		`<video controls preload="metadata"${candidate.poster ? ` poster="${escapeHtml(candidate.poster)}"` : ''} src="${escapeHtml(candidate.url)}"></video>`,
 		`<p><a href="${escapeHtml(candidate.url)}">X视频未内联：下载/打开视频</a></p>`,
 	];
 	if (candidate.poster) {
 		lines.push(`<p><a href="${escapeHtml(candidate.url)}"><img src="${escapeHtml(candidate.poster)}" alt="X视频封面"></a></p>`);
 	}
 	lines.push('</section>');
+	return lines.join('');
+}
 
-	console.log('[X Clipper] Added video fallback:', {
-		pageUrl,
-		videoUrl: candidate.url,
-		poster: candidate.poster,
-		source: candidate.source,
-		bitrate: candidate.bitrate,
-		contentType: candidate.contentType,
-	});
+function insertXVideoSectionNearTweetMedia(content: string, videoSection: string, tweetUrl?: string): string {
+	try {
+		const parser = new DOMParser();
+		const doc = parser.parseFromString(content, 'text/html');
+		let target: Element | null = null;
+		if (tweetUrl) {
+			const exactLink = Array.from(doc.querySelectorAll('a[href]'))
+				.find(link => link.getAttribute('href') === tweetUrl);
+			const tweet = exactLink?.closest('.tweet');
+			target = tweet?.querySelector('.tweet-text') || null;
+		}
+		target = target
+			|| doc.querySelector('.main-tweet .tweet-text')
+			|| doc.querySelector('.tweet-thread .tweet .tweet-text')
+			|| doc.querySelector('[data-testid="tweetText"]');
 
-	return `${content}${lines.join('')}`;
+		if (!target) return `${content}<hr>${videoSection}`;
+
+		const template = doc.createElement('template');
+		template.innerHTML = videoSection;
+		const section = template.content.firstElementChild;
+		if (!section) return `${content}<hr>${videoSection}`;
+
+		target.insertAdjacentElement('afterend', section);
+		return doc.body.innerHTML;
+	} catch {
+		return `${content}<hr>${videoSection}`;
+	}
 }

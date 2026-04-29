@@ -2,6 +2,14 @@ function isGitHubHost(url: URL): boolean {
 	return url.hostname === 'github.com' || url.hostname === 'www.github.com';
 }
 
+export function isGitHubUrl(pageUrl: string): boolean {
+	try {
+		return isGitHubHost(new URL(pageUrl));
+	} catch {
+		return false;
+	}
+}
+
 export function isGitHubMarkdownUrl(pageUrl: string): boolean {
 	try {
 		const url = new URL(pageUrl);
@@ -11,6 +19,20 @@ export function isGitHubMarkdownUrl(pageUrl: string): boolean {
 		if (blobIndex < 2 || parts.length <= blobIndex + 2) return false;
 		const filePath = parts.slice(blobIndex + 2).join('/').toLowerCase();
 		return filePath.endsWith('.md') || filePath.endsWith('.markdown');
+	} catch {
+		return false;
+	}
+}
+
+export function isGitHubReadmeUrl(pageUrl: string): boolean {
+	try {
+		const url = new URL(pageUrl);
+		if (!isGitHubHost(url)) return false;
+		const parts = url.pathname.split('/').filter(Boolean);
+		if (isGitHubMarkdownUrl(pageUrl)) return true;
+		if (parts.length === 2) return true;
+		if (parts.length >= 4 && parts[2] === 'tree') return true;
+		return false;
 	} catch {
 		return false;
 	}
@@ -104,7 +126,7 @@ export async function inlineGitHubReadmeImages(
 	pageUrl: string,
 	options: { maxImageBytes?: number; maxTotalBytes?: number; concurrency?: number } = {}
 ): Promise<string> {
-	if (!isGitHubMarkdownUrl(pageUrl) || !content.includes('<img')) return content;
+	if (!isGitHubUrl(pageUrl) || !content.includes('<img')) return content;
 
 	const maxImageBytes = options.maxImageBytes ?? 8 * 1024 * 1024;
 	const maxTotalBytes = options.maxTotalBytes ?? 120 * 1024 * 1024;
@@ -160,9 +182,9 @@ export function applyGitHubReadmeFallback<T extends { content?: string }>(
 	parsed: T,
 	pageUrl: string
 ): T {
-	if (!isGitHubMarkdownUrl(pageUrl)) return parsed;
+	if (!isGitHubUrl(pageUrl)) return parsed;
 
-	const article = doc.querySelector('article.markdown-body');
+	const article = doc.querySelector('article.markdown-body, .markdown-body');
 	if (!article) return parsed;
 
 	const clone = article.cloneNode(true) as HTMLElement;

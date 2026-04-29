@@ -3,13 +3,13 @@ import { loadPlatformSettings } from '../settings';
 import {
 	applyGitHubReadmeFallback,
 	inlineGitHubReadmeImages,
-	isGitHubMarkdownUrl,
+	isGitHubUrl,
 	normalizeGitHubReadmeImages,
 } from './extractor';
 
 export const githubPlatform: PlatformModule = {
 	id: 'github',
-	matches: isGitHubMarkdownUrl,
+	matches: isGitHubUrl,
 	beforeDomNormalize({ document, url }) {
 		normalizeGitHubReadmeImages(document, url);
 	},
