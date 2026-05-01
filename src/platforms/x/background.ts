@@ -196,10 +196,13 @@ async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<XVide
 		if (csrfToken) headers['x-csrf-token'] = csrfToken;
 
 		try {
+			const controller = new AbortController();
+			const timeout = window.setTimeout(() => controller.abort(), 8000);
 			const response = await fetch(apiUrl, {
 				credentials: 'include',
 				headers,
-			});
+				signal: controller.signal,
+			}).finally(() => window.clearTimeout(timeout));
 			if (!response.ok) return [];
 			const data = await response.json();
 			const mediaObjects = [
@@ -348,9 +351,16 @@ export function registerXBackgroundHandlers(): PlatformBackgroundHandler[] {
 					const csrfToken = cookie('ct0');
 					if (guestToken) headers['x-guest-token'] = guestToken;
 					if (csrfToken) headers['x-csrf-token'] = csrfToken;
-					const response = await fetch(apiUrl, { credentials: 'include', headers });
-					if (!response.ok) return null;
-					const data = await response.json();
+					const controller = new AbortController();
+					const timeout = window.setTimeout(() => controller.abort(), 8000);
+					let data: unknown;
+					try {
+						const response = await fetch(apiUrl, { credentials: 'include', headers, signal: controller.signal });
+						if (!response.ok) return null;
+						data = await response.json();
+					} finally {
+						window.clearTimeout(timeout);
+					}
 					const seen = new Set<unknown>();
 					const stack: unknown[] = [data];
 					const candidates: Array<{ id: string; poster?: string; url: string; bitrate?: number; contentType?: string; source: string }> = [];

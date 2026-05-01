@@ -1,6 +1,12 @@
 import { PlatformModule } from '../types';
 import { registerXBackgroundHandlers } from './background';
-import { appendXVideoFallback, hydrateXMediaBeforeExtract, isXStatusUrl } from './extractor';
+import {
+	appendXVideoFallback,
+	buildXMarkdownWithMedia,
+	extractXStructuredContent,
+	hydrateXMediaBeforeExtract,
+	isXStatusUrl,
+} from './extractor';
 
 export const xPlatform: PlatformModule = {
 	id: 'x',
@@ -9,11 +15,17 @@ export const xPlatform: PlatformModule = {
 	beforeDomNormalize({ document }) {
 		return hydrateXMediaBeforeExtract(document);
 	},
-	async afterExtract({ parsed, url }) {
+	extractStructuredContent({ document, url }) {
+		return extractXStructuredContent(document, url);
+	},
+	async afterExtract({ document, parsed, url }) {
 		if (!parsed?.content) return parsed;
 		return {
 			...parsed,
 			content: await appendXVideoFallback(parsed.content, url, document),
 		};
+	},
+	afterMarkdown({ content, currentUrl }) {
+		return buildXMarkdownWithMedia(content, currentUrl);
 	},
 };

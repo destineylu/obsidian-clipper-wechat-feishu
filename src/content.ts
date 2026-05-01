@@ -222,6 +222,23 @@ declare global {
 		metaTags: { name?: string | null; property?: string | null; content: string | null }[];
 	}
 
+	function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, fallback: T): Promise<T> {
+		let timeoutId: number | undefined;
+		const timeout = new Promise<T>(resolve => {
+			timeoutId = window.setTimeout(() => {
+				console.warn(`[Obsidian Clipper] ${label} timed out after ${timeoutMs}ms`);
+				resolve(fallback);
+			}, timeoutMs);
+		});
+		return Promise.race([promise, timeout]).finally(() => {
+			if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+		});
+	}
+
+	function isXStatusPage(url: string): boolean {
+		return /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(url);
+	}
+
 	browser.runtime.onMessage.addListener((request: any, sender, sendResponse) => {
 		// If a newer generation of this content script has been injected,
 		// yield to it rather than responding from a potentially stale context.
@@ -314,8 +331,14 @@ declare global {
 			// Flatten shadow DOM before extraction (async, needs main world)
 			const flattenTimeout = new Promise<void>(resolve => setTimeout(resolve, 3000));
 			Promise.race([flattenShadowDom(document), flattenTimeout]).then(async () => {
+				const currentUrl = document.URL || location.href;
 				await loadSettings();
-				await platformRegistry.beforeDomNormalize({ document, url: document.URL || location.href });
+				await withTimeout(
+					Promise.resolve(platformRegistry.beforeDomNormalize({ document, url: currentUrl })),
+					isXStatusPage(currentUrl) ? 12000 : 20000,
+					'platform beforeDomNormalize',
+					undefined
+				);
 
 				let selectedHtml = '';
 				const selection = window.getSelection();
@@ -328,16 +351,52 @@ declare global {
 					selectedHtml = div.innerHTML;
 				}
 
-				// Use parseAsync to ensure async variables like {{transcript}} are available.
-				// If it hangs (e.g. another extension has corrupted fetch), fall back to sync parse.
-				const defuddle = new Defuddle(document, { url: document.URL });
-				const parseTimeout = new Promise<never>((_, reject) =>
-					setTimeout(() => reject(new Error('parseAsync timeout')), 8000)
+				let platformContent = await withTimeout(
+					Promise.resolve(platformRegistry.extractStructuredContent({ document, url: currentUrl })),
+					isXStatusPage(currentUrl) ? 15000 : 20000,
+					'platform structured extraction',
+					null
 				);
-				let defuddled = await Promise.race([defuddle.parseAsync(), parseTimeout])
-					.catch(() => defuddle.parse());
-				defuddled = await platformRegistry.afterExtract({ document, parsed: defuddled, url: document.URL || location.href });
-				const platformContent = await platformRegistry.extractStructuredContent({ document, url: document.URL || location.href });
+				let defuddled: any = {
+					author: '',
+					description: '',
+					favicon: '',
+					image: '',
+					language: '',
+					metaTags: [],
+					parseTime: 0,
+					published: '',
+					schemaOrgData: null,
+					site: '',
+					title: document.title,
+					variables: {},
+					wordCount: 0,
+				};
+
+				if (platformContent?.site !== 'X') {
+					// Use parseAsync to ensure async variables like {{transcript}} are available.
+					// If it hangs (e.g. another extension has corrupted fetch), fall back to sync parse.
+					const defuddle = new Defuddle(document, { url: currentUrl });
+					const parseTimeout = new Promise<never>((_, reject) =>
+						setTimeout(() => reject(new Error('parseAsync timeout')), 8000)
+					);
+					defuddled = await Promise.race([defuddle.parseAsync(), parseTimeout])
+						.catch(() => defuddle.parse());
+					defuddled = await withTimeout(
+						Promise.resolve(platformRegistry.afterExtract({ document, parsed: defuddled, url: currentUrl })),
+						15000,
+						'platform afterExtract',
+						defuddled
+					);
+					if (!platformContent) {
+						platformContent = await withTimeout(
+							Promise.resolve(platformRegistry.extractStructuredContent({ document, url: currentUrl })),
+							10000,
+							'platform structured extraction',
+							null
+						);
+					}
+				}
 				const extractedContent: { [key: string]: string } = {
 					...defuddled.variables,
 					...(platformContent?.variables || {}),
