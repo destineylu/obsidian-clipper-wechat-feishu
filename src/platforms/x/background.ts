@@ -11,6 +11,13 @@ interface XVideoCandidate {
 	source: string;
 }
 
+interface XVideoVariant {
+	bit_rate?: number;
+	bitrate?: number;
+	content_type?: string;
+	url?: string;
+}
+
 function isXStatusUrl(url: string): boolean {
 	return X_STATUS_PATTERN.test(url);
 }
@@ -79,22 +86,28 @@ async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<XVide
 		return found;
 	};
 	const fromMediaObject = (media: Record<string, unknown>): XVideoCandidate | null => {
-		const videoInfo = media.video_info;
+		const mediaInfo = isObject(media.media_info) ? media.media_info : null;
+		const videoInfo = isObject(media.video_info) ? media.video_info : mediaInfo;
 		if (!isObject(videoInfo) || !Array.isArray(videoInfo.variants)) return null;
-		const variant = (videoInfo.variants as Array<{ bitrate?: number; content_type?: string; url?: string }>)
+		const variant = (videoInfo.variants as XVideoVariant[])
 			.filter(item => item.url && videoUrlPattern.test(item.url))
 			.sort((left, right) => {
 				const leftIsMp4 = left.content_type === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(left.url || '');
 				const rightIsMp4 = right.content_type === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(right.url || '');
 				if (leftIsMp4 !== rightIsMp4) return leftIsMp4 ? -1 : 1;
-				return (right.bitrate || 0) - (left.bitrate || 0);
+				return (right.bitrate || right.bit_rate || 0) - (left.bitrate || left.bit_rate || 0);
 			})[0];
 		if (!variant?.url) return null;
+		const previewImage = isObject(mediaInfo?.preview_image) ? mediaInfo.preview_image : null;
 		return {
-			id: String(media.id_str || media.media_key || variant.url),
-			poster: typeof media.media_url_https === 'string' ? media.media_url_https : undefined,
+			id: String(media.id_str || media.media_id || media.media_key || variant.url),
+			poster: typeof media.media_url_https === 'string'
+				? media.media_url_https
+				: typeof previewImage?.original_img_url === 'string'
+					? previewImage.original_img_url
+					: undefined,
 			url: normalizeVideoUrl(variant.url),
-			bitrate: variant.bitrate,
+			bitrate: variant.bitrate || variant.bit_rate,
 			contentType: variant.content_type,
 			source: 'main-world-initial-state',
 		};
@@ -369,15 +382,21 @@ export function registerXBackgroundHandlers(): PlatformBackgroundHandler[] {
 						if (!current || typeof current !== 'object' || seen.has(current)) continue;
 						seen.add(current);
 						const object = current as Record<string, unknown>;
-						const videoInfo = object.video_info as Record<string, unknown> | undefined;
+						const mediaInfo = object.media_info as Record<string, unknown> | undefined;
+						const videoInfo = (object.video_info || mediaInfo) as Record<string, unknown> | undefined;
 						if (videoInfo && Array.isArray(videoInfo.variants)) {
-							for (const variant of videoInfo.variants as Array<{ bitrate?: number; content_type?: string; url?: string }>) {
+							const previewImage = mediaInfo?.preview_image as Record<string, unknown> | undefined;
+							for (const variant of videoInfo.variants as Array<{ bit_rate?: number; bitrate?: number; content_type?: string; url?: string }>) {
 								if (!variant.url || !/^https:\/\/video\.twimg\.com\/.+\.(?:mp4|m3u8)(?:[?#].*)?$/i.test(variant.url)) continue;
 								candidates.push({
-									id: String(object.id_str || object.media_key || variant.url),
-									poster: typeof object.media_url_https === 'string' ? object.media_url_https : undefined,
+									id: String(object.id_str || object.media_id || object.media_key || variant.url),
+									poster: typeof object.media_url_https === 'string'
+										? object.media_url_https
+										: typeof previewImage?.original_img_url === 'string'
+											? previewImage.original_img_url
+											: undefined,
 									url: variant.url,
-									bitrate: variant.bitrate,
+									bitrate: variant.bitrate || variant.bit_rate,
 									contentType: variant.content_type,
 									source: 'main-world-graphql-inline',
 								});
@@ -387,17 +406,31 @@ export function registerXBackgroundHandlers(): PlatformBackgroundHandler[] {
 							if (value && typeof value === 'object') stack.push(value);
 						}
 					}
-					return candidates.sort((left, right) => {
+					const sortedCandidates = candidates.sort((left, right) => {
 						const leftIsMp4 = left.contentType === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(left.url);
 						const rightIsMp4 = right.contentType === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(right.url);
 						if (leftIsMp4 !== rightIsMp4) return leftIsMp4 ? -1 : 1;
 						return (right.bitrate || 0) - (left.bitrate || 0);
-					})[0] || null;
+					});
+					const bestById = new Map<string, typeof sortedCandidates[number]>();
+					for (const candidate of sortedCandidates) {
+						if (!bestById.has(candidate.id)) bestById.set(candidate.id, candidate);
+					}
+					const bestCandidates = Array.from(bestById.values());
+					return {
+						candidate: bestCandidates[0] || null,
+						candidates: bestCandidates,
+					};
 				},
 				args: [url],
 			} as any).then((results: Array<{ result?: unknown }>) => {
-				const candidate = results[0]?.result as XVideoCandidate | null | undefined;
-				sendResponse({ success: true, candidate: candidate || null });
+				const result = results[0]?.result as { candidate?: XVideoCandidate | null; candidates?: XVideoCandidate[] } | XVideoCandidate | null | undefined;
+				if (result && 'candidates' in result) {
+					sendResponse({ success: true, candidate: result.candidate || null, candidates: result.candidates || [] });
+					return;
+				}
+				const candidate = result as XVideoCandidate | null | undefined;
+				sendResponse({ success: true, candidate: candidate || null, candidates: candidate ? [candidate] : [] });
 			}).catch((error) => {
 				sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
 			});

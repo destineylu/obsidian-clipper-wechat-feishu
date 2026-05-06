@@ -3,6 +3,7 @@ import { createMarkdownContent } from 'defuddle/full';
 import { PlatformMarkdownResult, PlatformStructuredContent } from '../types';
 
 interface XVideoVariant {
+	bit_rate?: number;
 	bitrate?: number;
 	content_type?: string;
 	url?: string;
@@ -19,6 +20,7 @@ interface XVideoCandidate {
 
 interface XThreadArticleSnapshot {
 	html: string;
+	mediaCount: number;
 	statusUrl: string;
 	text: string;
 }
@@ -33,13 +35,20 @@ interface XThreadSnapshot {
 	wordCount: number;
 }
 
+interface XPageMediaSnapshot {
+	imageUrls: string[];
+	mediaLinks: string[];
+	pageUrl: string;
+}
+
 const X_STATUS_PATTERN = /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/i;
 const VIDEO_URL_PATTERN = /^https:\/\/video\.twimg\.com\/.+\.(?:mp4|m3u8)(?:[?#].*)?$/i;
 const SHOW_MORE_PATTERN = /\bshow more\b|\bread more\b|显示更多|查看更多|展开全文|展开更多|查看全部/i;
 const SHOW_MORE_EXCLUDE_PATTERN = /\bshow more repl(?:y|ies)\b|\breplies\b|\breply\b|\bcomments?\b|\bmore menu\b|回复|评论|更多菜单/i;
-const X_MEDIA_IMAGE_PATTERN = /^https:\/\/pbs\.twimg\.com\/media\//i;
-const X_VIDEO_FETCH_TIMEOUT_MS = 2500;
+const X_MEDIA_IMAGE_PATTERN = /^https:\/\/pbs\.twimg\.com\/(?:media|amplify_video_thumb|ext_tw_video_thumb|tweet_video_thumb)\//i;
+const X_VIDEO_FETCH_TIMEOUT_MS = 8000;
 let xThreadSnapshot: XThreadSnapshot | null = null;
+let xPageMediaSnapshot: XPageMediaSnapshot | null = null;
 
 export function isXStatusUrl(url: string): boolean {
 	return X_STATUS_PATTERN.test(url);
@@ -92,7 +101,7 @@ function normalizeXMediaImageUrl(value: string): string {
 	try {
 		const parsed = new URL(decodeHtmlAttribute(value));
 		if (!X_MEDIA_IMAGE_PATTERN.test(parsed.href)) return '';
-		if (parsed.searchParams.has('name')) {
+		if (/^\/media\//i.test(parsed.pathname) && parsed.searchParams.has('name')) {
 			parsed.searchParams.set('name', 'large');
 		}
 		return parsed.href;
@@ -101,8 +110,26 @@ function normalizeXMediaImageUrl(value: string): string {
 	}
 }
 
+function normalizeXArticleMediaUrl(value: string, baseUrl: string): string {
+	try {
+		const parsed = new URL(decodeHtmlAttribute(value), baseUrl);
+		if (!/^\/[^/]+\/article\/\d+\/media\/\d+$/i.test(parsed.pathname)) return '';
+		return parsed.href;
+	} catch {
+		return '';
+	}
+}
+
 function dedupePreserveOrder<T>(items: T[]): T[] {
 	return Array.from(new Set(items));
+}
+
+function countMatches(value: string, pattern: RegExp): number {
+	return (value.match(pattern) || []).length;
+}
+
+function extractUrlsFromCssValue(value: string): string[] {
+	return Array.from(value.matchAll(/url\((["']?)(.*?)\1\)/gi), match => match[2]).filter(Boolean);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -181,7 +208,7 @@ function chooseBestVariant(variants: XVideoVariant[]): XVideoVariant | null {
 			const leftIsMp4 = left.content_type === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(left.url || '');
 			const rightIsMp4 = right.content_type === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(right.url || '');
 			if (leftIsMp4 !== rightIsMp4) return leftIsMp4 ? -1 : 1;
-			return (right.bitrate || 0) - (left.bitrate || 0);
+			return (right.bitrate || right.bit_rate || 0) - (left.bitrate || left.bit_rate || 0);
 		});
 	return usable[0] || null;
 }
@@ -243,24 +270,28 @@ function getInitialState(): unknown | null {
 }
 
 function candidateFromMediaObject(media: Record<string, unknown>, source: string): XVideoCandidate | null {
-	const videoInfo = media.video_info;
+	const mediaInfo = isObject(media.media_info) ? media.media_info : null;
+	const videoInfo = isObject(media.video_info) ? media.video_info : mediaInfo;
 	if (!isObject(videoInfo) || !Array.isArray(videoInfo.variants)) return null;
 
 	const variant = chooseBestVariant(videoInfo.variants as XVideoVariant[]);
 	if (!variant?.url) return null;
 
-	const id = String(media.id_str || media.media_key || variant.url);
+	const id = String(media.id_str || media.media_id || media.media_key || variant.url);
+	const previewImage = isObject(mediaInfo?.preview_image) ? mediaInfo.preview_image : null;
 	const poster = typeof media.media_url_https === 'string'
 		? media.media_url_https
 		: typeof media.media_url === 'string'
 			? media.media_url
-			: undefined;
+			: typeof previewImage?.original_img_url === 'string'
+				? previewImage.original_img_url
+				: undefined;
 
 	return {
 		id,
 		poster,
 		url: normalizeVideoUrl(variant.url),
-		bitrate: variant.bitrate,
+		bitrate: variant.bitrate || variant.bit_rate,
 		contentType: variant.content_type,
 		source,
 	};
@@ -336,15 +367,19 @@ function chooseBestCandidate(candidates: XVideoCandidate[]): XVideoCandidate | n
 	return sorted[0] || null;
 }
 
-async function extractFromMainWorld(url: string): Promise<XVideoCandidate | null> {
+async function extractFromMainWorldCandidates(url: string): Promise<XVideoCandidate[]> {
 	const response = await Promise.race([
 		browser.runtime.sendMessage({
 			action: 'xExtractVideoCandidate',
 			url,
 		}).catch(() => null),
 		wait(X_VIDEO_FETCH_TIMEOUT_MS).then(() => null),
-	]) as { success?: boolean; candidate?: XVideoCandidate | null } | null;
-	return response?.success ? response.candidate || null : null;
+	]) as { success?: boolean; candidate?: XVideoCandidate | null; candidates?: XVideoCandidate[] } | null;
+	if (!response?.success) return [];
+	return dedupeCandidates([
+		...(Array.isArray(response.candidates) ? response.candidates : []),
+		...(response.candidate ? [response.candidate] : []),
+	]);
 }
 
 function getVisibleText(element: Element): string {
@@ -366,7 +401,15 @@ function getPrimaryTweetScope(doc: Document): Element {
 }
 
 function hasXVideoMedia(root: ParentNode): boolean {
-	return !!root.querySelector('video, [data-testid="videoPlayer"], [data-testid="videoComponent"]');
+	return !!root.querySelector([
+		'video',
+		'[data-testid="videoPlayer"]',
+		'[data-testid="videoComponent"]',
+		'img[src*="amplify_video_thumb"]',
+		'img[src*="ext_tw_video_thumb"]',
+		'img[src*="tweet_video_thumb"]',
+		'a[href*="/article/"][href*="/media/"]',
+	].join(','));
 }
 
 function getXArticleStatusUrls(article: Element, baseUrl: string): string[] {
@@ -469,14 +512,23 @@ function collectVisibleXThreadArticles(
 			statusUrl,
 			text: article.innerText || '',
 		};
-		if (!existing || snapshot.text.length > existing.text.length + 20) {
+		const mediaCount = countXStructuredMediaItems(snapshot.html);
+		if (!existing
+			|| snapshot.text.length > existing.text.length + 20
+			|| mediaCount > existing.mediaCount) {
 			articlesByUrl.set(statusUrl, {
 				html: snapshot.html,
+				mediaCount,
 				statusUrl: snapshot.statusUrl,
 				text: snapshot.text,
 			});
 		}
 	}
+}
+
+function countXStructuredMediaItems(html: string): number {
+	return countMatches(html, /https:\/\/pbs\.twimg\.com\/(?:media|amplify_video_thumb|ext_tw_video_thumb|tweet_video_thumb)\//gi)
+		+ countMatches(html, /\/article\/\d+\/media\/\d+/gi);
 }
 
 function saveXThreadSnapshot(pageUrl: string, articlesByUrl: Map<string, XThreadArticleSnapshot>): void {
@@ -499,12 +551,32 @@ function saveXThreadSnapshot(pageUrl: string, articlesByUrl: Map<string, XThread
 	};
 }
 
+function captureXPageMediaSnapshot(doc: Document, pageUrl: string): void {
+	const article = getXTargetArticle(doc, pageUrl);
+	if (!article) return;
+	const nextSnapshot: XPageMediaSnapshot = {
+		imageUrls: extractXMediaImagesFromElement(article),
+		mediaLinks: collectXArticleMediaLinks(article, pageUrl),
+		pageUrl: normalizeXStatusUrl(pageUrl),
+	};
+	if (!xPageMediaSnapshot || xPageMediaSnapshot.pageUrl !== nextSnapshot.pageUrl) {
+		xPageMediaSnapshot = nextSnapshot;
+		return;
+	}
+	xPageMediaSnapshot = {
+		...nextSnapshot,
+		imageUrls: dedupePreserveOrder([...xPageMediaSnapshot.imageUrls, ...nextSnapshot.imageUrls]),
+		mediaLinks: dedupePreserveOrder([...xPageMediaSnapshot.mediaLinks, ...nextSnapshot.mediaLinks]),
+	};
+}
+
 export async function hydrateXMediaBeforeExtract(doc: Document): Promise<void> {
 	const win = doc.defaultView;
 	const pageUrl = doc.URL || win?.location.href || '';
 	if (!win || !isXStatusUrl(pageUrl)) return;
 	if (!doc.querySelector('[data-testid="longformRichTextComponent"], article, video')) return;
 	xThreadSnapshot = null;
+	xPageMediaSnapshot = null;
 
 	const startedAt = Date.now();
 	const maxDurationMs = 8000;
@@ -512,11 +584,15 @@ export async function hydrateXMediaBeforeExtract(doc: Document): Promise<void> {
 	const threadArticles = new Map<string, XThreadArticleSnapshot>();
 	const threadState = { started: false, seenNonAuthor: false };
 	const originalY = win.scrollY;
+	let hasLongform = false;
 	try {
+		captureXPageMediaSnapshot(doc, pageUrl);
+		collectVisibleXThreadArticles(doc, pageUrl, threadArticles, threadState);
 		await expandXPrimaryShowMore(doc);
 		if (hasTimeBudget()) await expandXThreadShowMore(doc, pageUrl);
+		captureXPageMediaSnapshot(doc, pageUrl);
 		collectVisibleXThreadArticles(doc, pageUrl, threadArticles, threadState);
-		const hasLongform = !!doc.querySelector('[data-testid="longformRichTextComponent"]');
+		hasLongform = !!doc.querySelector('[data-testid="longformRichTextComponent"]');
 		const maxSteps = hasLongform ? 8 : 6;
 		let previousScrollHeight = doc.body?.scrollHeight || 0;
 		let previousArticleCount = doc.querySelectorAll('article').length;
@@ -552,8 +628,13 @@ export async function hydrateXMediaBeforeExtract(doc: Document): Promise<void> {
 			previousSameAuthorCount = threadArticles.size;
 		}
 	} finally {
+		captureXPageMediaSnapshot(doc, pageUrl);
 		collectVisibleXThreadArticles(doc, pageUrl, threadArticles, threadState);
-		saveXThreadSnapshot(pageUrl, threadArticles);
+		if (hasLongform) {
+			xThreadSnapshot = null;
+		} else {
+			saveXThreadSnapshot(pageUrl, threadArticles);
+		}
 		win.scrollTo(0, originalY);
 		if (hasTimeBudget()) await wait(100);
 	}
@@ -614,9 +695,21 @@ function docTitleFallback(): string {
 }
 
 function extractXMediaImagesFromElement(element: Element): string[] {
-	return dedupePreserveOrder(Array.from(element.querySelectorAll<HTMLImageElement>('img'))
+	const imageSources = Array.from(element.querySelectorAll<HTMLImageElement>('img'))
 		.map(img => normalizeXMediaImageUrl(img.currentSrc || img.src || img.getAttribute('src') || ''))
-		.filter(Boolean));
+		.filter(Boolean);
+	const backgroundSources = Array.from(element.querySelectorAll<HTMLElement>('*'))
+		.flatMap((node) => {
+			const inlineStyle = node.getAttribute('style') || '';
+			const computedStyle = typeof getComputedStyle === 'function' ? getComputedStyle(node).backgroundImage : '';
+			return [
+				...extractUrlsFromCssValue(inlineStyle),
+				...extractUrlsFromCssValue(computedStyle),
+			];
+		})
+		.map(src => normalizeXMediaImageUrl(src))
+		.filter(Boolean);
+	return dedupePreserveOrder([...imageSources, ...backgroundSources]);
 }
 
 function extractXMediaImagesFromHtml(content: string): string[] {
@@ -642,8 +735,45 @@ function normalizeXMediaImagesInElement(element: Element): string[] {
 	return dedupePreserveOrder(normalizedImages);
 }
 
-function buildXImageFigure(imageUrl: string): string {
-	return `<figure><img src="${escapeHtml(imageUrl)}" alt="Image"></figure>`;
+function buildXImageFigure(imageUrl: string, linkUrl = ''): string {
+	const image = `<img src="${escapeHtml(imageUrl)}" alt="Image">`;
+	return linkUrl
+		? `<figure><a href="${escapeHtml(linkUrl)}">${image}</a></figure>`
+		: `<figure>${image}</figure>`;
+}
+
+function isXVideoThumbnailUrl(imageUrl: string): boolean {
+	return /^https:\/\/pbs\.twimg\.com\/(?:amplify_video_thumb|ext_tw_video_thumb|tweet_video_thumb)\//i.test(imageUrl);
+}
+
+function buildXVideoPosterFallback(imageUrl: string, pageUrl: string): string {
+	return [
+		'<section data-obsidian-clipper-x-video="true">',
+		'<h2>X 视频</h2>',
+		`<p><a href="${escapeHtml(pageUrl)}"><img src="${escapeHtml(imageUrl)}" alt="X视频封面"></a></p>`,
+		`<p><a href="${escapeHtml(pageUrl)}">X视频：打开原文播放</a></p>`,
+		'</section>',
+	].join('');
+}
+
+function buildXMediaLink(mediaUrl: string): string {
+	return `<p><a href="${escapeHtml(mediaUrl)}">X媒体：打开原文媒体</a></p>`;
+}
+
+function findXArticleCardLinkForImage(img: HTMLImageElement, pageUrl: string): string {
+	if (!/article cover image/i.test(img.getAttribute('alt') || '')
+		&& !img.closest('[data-testid="article-cover-image"]')) {
+		return '';
+	}
+	const currentUrl = normalizeXStatusUrl(pageUrl);
+	let node: Element | null = img.closest('[data-testid="article-cover-image"]') || img.parentElement;
+	for (let depth = 0; node && depth < 8 && node.tagName !== 'ARTICLE'; depth++, node = node.parentElement) {
+		const statusUrl = Array.from(node.querySelectorAll<HTMLAnchorElement>('a[href*="/status/"]'))
+			.map(anchor => normalizeXStatusUrl(anchor.getAttribute('href') || anchor.href, pageUrl))
+			.find(url => url && url !== currentUrl);
+		if (statusUrl) return statusUrl;
+	}
+	return '';
 }
 
 function getXLinePreservingText(element: HTMLElement | null): string {
@@ -702,11 +832,131 @@ function collectXMediaImagesOutsideBody(article: HTMLElement, bodyRoot: Element 
 		.filter(Boolean));
 }
 
+function collectXArticleMediaLinks(article: HTMLElement, pageUrl: string): string[] {
+	return dedupePreserveOrder(Array.from(article.querySelectorAll<HTMLAnchorElement>('a[href*="/article/"][href*="/media/"]'))
+		.filter(anchor => extractXMediaImagesFromElement(anchor).length === 0)
+		.map(anchor => normalizeXArticleMediaUrl(anchor.getAttribute('href') || anchor.href, pageUrl))
+		.filter(Boolean));
+}
+
+function getXCodeBlockLanguage(pre: HTMLElement): string {
+	const code = pre.querySelector<HTMLElement>('code[class*="language-"]');
+	const language = code?.className.match(/\blanguage-([\w-]+)/)?.[1] || '';
+	return language.toLowerCase();
+}
+
+function buildXCodeBlock(pre: HTMLElement): string {
+	const code = pre.querySelector<HTMLElement>('code') || pre;
+	const language = getXCodeBlockLanguage(pre);
+	return `<pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(code.innerText || code.textContent || '')}</code></pre>`;
+}
+
+function stripTrailingXCodeLanguageLabel(text: string, language: string): string {
+	if (!language) return text;
+	const aliases = language === 'bash' ? ['bash', 'shell', 'sh', 'zsh'] : [language];
+	const escapedAliases = aliases.map(alias => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+	return text.replace(new RegExp(`(?:\\s|\\n)*(?:${escapedAliases})\\s*$`, 'i'), '');
+}
+
+function collectXOrderedBodyMedia(bodyRoot: HTMLElement, pageUrl: string): Array<{ element: Element; html: string; imageUrl?: string; mediaUrl?: string; codeLanguage?: string }> {
+	const ordered: Array<{ element: Element; html: string; imageUrl?: string; mediaUrl?: string; codeLanguage?: string }> = [];
+	const seen = new Set<string>();
+	for (const element of Array.from(bodyRoot.querySelectorAll<HTMLElement>('pre, a[href*="/article/"][href*="/media/"], img'))) {
+		if (element.tagName !== 'PRE' && element.closest('pre')) continue;
+		if (element instanceof HTMLAnchorElement && extractXMediaImagesFromElement(element).length > 0) continue;
+		const isCodeBlock = element.tagName === 'PRE';
+		const codeLanguage = isCodeBlock
+			? getXCodeBlockLanguage(element)
+			: '';
+		const mediaUrl = element instanceof HTMLAnchorElement
+			? normalizeXArticleMediaUrl(element.getAttribute('href') || element.href, pageUrl)
+			: '';
+		const imageUrl = element instanceof HTMLImageElement
+			? normalizeXMediaImageUrl(element.currentSrc || element.src || element.getAttribute('src') || '')
+			: '';
+		const imageLinkUrl = element instanceof HTMLImageElement
+			? findXArticleCardLinkForImage(element, pageUrl)
+			: '';
+		const key = isCodeBlock ? `code:${ordered.length}` : mediaUrl || imageUrl;
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		ordered.push({
+			element,
+			html: isCodeBlock
+				? buildXCodeBlock(element)
+				: mediaUrl
+				? buildXMediaLink(mediaUrl)
+				: isXVideoThumbnailUrl(imageUrl)
+					? buildXVideoPosterFallback(imageUrl, pageUrl)
+					: buildXImageFigure(imageUrl, imageLinkUrl),
+			imageUrl: imageUrl || undefined,
+			mediaUrl: mediaUrl || undefined,
+			codeLanguage: codeLanguage || undefined,
+		});
+	}
+	return ordered;
+}
+
+function buildXBodyHtmlWithInlineMedia(
+	bodyRoot: HTMLElement,
+	pageUrl: string
+): { html: string; imageUrls: string[]; mediaLinks: string[] } {
+	const mediaItems = collectXOrderedBodyMedia(bodyRoot, pageUrl);
+	if (mediaItems.length === 0) {
+		return {
+			html: buildXTextHtmlFromPlainText(getXLinePreservingText(bodyRoot)),
+			imageUrls: [],
+			mediaLinks: [],
+		};
+	}
+
+	const doc = bodyRoot.ownerDocument;
+	const parts: string[] = [];
+	const imageUrls: string[] = [];
+	const mediaLinks: string[] = [];
+	const appendTextRange = (range: Range, nextCodeLanguage = '') => {
+		const text = stripTrailingXCodeLanguageLabel(range.toString(), nextCodeLanguage);
+		if (text.trim()) parts.push(buildXTextHtmlFromPlainText(text));
+	};
+
+	let startContainer: Node = bodyRoot;
+	let startOffset = 0;
+	for (const item of mediaItems) {
+		const range = doc.createRange();
+		range.setStart(startContainer, startOffset);
+		range.setEndBefore(item.element);
+		appendTextRange(range, item.codeLanguage || '');
+		range.detach();
+
+		parts.push(item.html);
+		if (item.imageUrl) imageUrls.push(item.imageUrl);
+		if (item.mediaUrl) mediaLinks.push(item.mediaUrl);
+
+		startContainer = item.element.parentNode || bodyRoot;
+		startOffset = Array.prototype.indexOf.call(startContainer.childNodes, item.element) + 1;
+	}
+
+	const tailRange = doc.createRange();
+	tailRange.setStart(startContainer, startOffset);
+	tailRange.setEnd(bodyRoot, bodyRoot.childNodes.length);
+	appendTextRange(tailRange);
+	tailRange.detach();
+
+	return {
+		html: parts.join(''),
+		imageUrls: dedupePreserveOrder(imageUrls),
+		mediaLinks: dedupePreserveOrder(mediaLinks),
+	};
+}
+
 function buildXArticleStructuredHtml(article: HTMLElement, pageUrl: string): string {
 	const longform = article.querySelector<HTMLElement>('[data-testid="longformRichTextComponent"]');
 	const tweetText = article.querySelector<HTMLElement>('[data-testid="tweetText"]');
-	const body = (longform || tweetText)?.cloneNode(true) as HTMLElement | null;
-	const bodyText = getXLinePreservingText(longform || tweetText);
+	const bodyRoot = longform || tweetText;
+	const body = bodyRoot?.cloneNode(true) as HTMLElement | null;
+	const bodyWithMedia = bodyRoot
+		? buildXBodyHtmlWithInlineMedia(bodyRoot, pageUrl)
+		: { html: '', imageUrls: [], mediaLinks: [] };
 	if (body) {
 		body.querySelectorAll('button, [role="button"], svg, [aria-hidden="true"]').forEach(el => el.remove());
 		body.querySelectorAll<HTMLElement>('[style]').forEach(el => el.removeAttribute('style'));
@@ -715,33 +965,55 @@ function buildXArticleStructuredHtml(article: HTMLElement, pageUrl: string): str
 
 	const mediaImages = extractXMediaImagesFromElement(article);
 	const includedImages = new Set(body ? extractXMediaImagesFromElement(body) : []);
-	const beforeBodyImages = collectXMediaImagesOutsideBody(article, longform || tweetText, true)
+	const beforeBodyImages = collectXMediaImagesOutsideBody(article, bodyRoot, true)
 		.filter(imageUrl => !includedImages.has(imageUrl));
 	for (const imageUrl of beforeBodyImages) includedImages.add(imageUrl);
-	const afterBodyImages = collectXMediaImagesOutsideBody(article, longform || tweetText, false)
+	const afterBodyImages = collectXMediaImagesOutsideBody(article, bodyRoot, false)
 		.filter(imageUrl => !includedImages.has(imageUrl));
 	for (const imageUrl of afterBodyImages) includedImages.add(imageUrl);
+	for (const imageUrl of bodyWithMedia.imageUrls) includedImages.add(imageUrl);
 	const fallbackImages = mediaImages.filter(imageUrl => !includedImages.has(imageUrl));
+	const includedMediaLinks = new Set(bodyWithMedia.mediaLinks);
+	const mediaLinks = collectXArticleMediaLinks(article, pageUrl)
+		.filter(mediaUrl => !includedMediaLinks.has(mediaUrl));
 
 	const parts = ['<article class="x-structured-article">'];
 	for (const imageUrl of beforeBodyImages) {
 		parts.push(buildXImageFigure(imageUrl));
 	}
-	if (bodyText.trim()) parts.push(buildXTextHtmlFromPlainText(bodyText));
+	if (bodyWithMedia.html) parts.push(bodyWithMedia.html);
 	for (const imageUrl of [...afterBodyImages, ...fallbackImages]) {
 		parts.push(buildXImageFigure(imageUrl));
+	}
+	for (const mediaUrl of mediaLinks) {
+		parts.push(buildXMediaLink(mediaUrl));
 	}
 	parts.push('</article>');
 	return parts.join('');
 }
 
+function addMissingXPageMedia(content: string, pageUrl: string): string {
+	if (xPageMediaSnapshot?.pageUrl !== normalizeXStatusUrl(pageUrl)) return content;
+	const existingImages = new Set(extractXMediaImagesFromHtml(content));
+	const existingLinks = new Set(Array.from(content.matchAll(/https:\/\/x\.com\/[^"'<>\s)]+\/article\/\d+\/media\/\d+/gi), match => match[0]));
+	const missingImages = xPageMediaSnapshot.imageUrls.filter(imageUrl => !existingImages.has(imageUrl));
+	const missingLinks = xPageMediaSnapshot.mediaLinks.filter(mediaUrl => !existingLinks.has(mediaUrl));
+	if (missingImages.length === 0 && missingLinks.length === 0) return content;
+	const additions = [
+		...missingImages.map(imageUrl => buildXImageFigure(imageUrl)),
+		...missingLinks.map(buildXMediaLink),
+	].join('');
+	return content.includes('</article>')
+		? content.replace('</article>', `${additions}</article>`)
+		: `${content}${additions}`;
+}
+
 export async function extractXStructuredContent(doc: Document, pageUrl: string): Promise<PlatformStructuredContent | null> {
 	if (!isXStatusUrl(pageUrl)) return null;
 	if (xThreadSnapshot?.pageUrl === normalizeXStatusUrl(pageUrl)) {
-		const candidate = hasXVideoMedia(doc) ? await extractXVideoCandidate(pageUrl) : null;
-		const content = candidate && !xThreadSnapshot.content.includes(candidate.url)
-			? xThreadSnapshot.content.replace('</article>', `${buildXVideoSection(candidate)}</article>`)
-			: xThreadSnapshot.content;
+		const candidates = hasXVideoMedia(doc) ? await extractXVideoCandidates(pageUrl) : [];
+		const contentWithMedia = addMissingXPageMedia(xThreadSnapshot.content, pageUrl);
+		const content = insertXVideoSections(contentWithMedia, candidates, pageUrl);
 		return {
 			author: xThreadSnapshot.author,
 			content,
@@ -765,10 +1037,9 @@ export async function extractXStructuredContent(doc: Document, pageUrl: string):
 	const title = extractXArticleTitle(article, pageUrl);
 	const time = article.querySelector<HTMLTimeElement>('time[datetime]');
 	let content = buildXArticleStructuredHtml(article, pageUrl);
-	const candidate = hasVideo ? await extractXVideoCandidate(pageUrl) : null;
-	if (candidate && !content.includes(candidate.url)) {
-		content = content.replace('</article>', `${buildXVideoSection(candidate)}</article>`);
-	}
+	content = addMissingXPageMedia(content, pageUrl);
+	const candidates = hasVideo ? await extractXVideoCandidates(pageUrl) : [];
+	content = insertXVideoSections(content, candidates, pageUrl);
 	return {
 		author: getXStatusAuthor(pageUrl) || '',
 		content,
@@ -781,28 +1052,30 @@ export async function extractXStructuredContent(doc: Document, pageUrl: string):
 }
 
 export async function extractXVideoCandidate(url: string): Promise<XVideoCandidate | null> {
-	const tweetId = getTweetId(url);
-	if (!tweetId) return null;
+	return chooseBestCandidate(await extractXVideoCandidates(url));
+}
 
-	const localCandidate = chooseBestCandidate([
+async function extractXVideoCandidates(url: string): Promise<XVideoCandidate[]> {
+	const tweetId = getTweetId(url);
+	if (!tweetId) return [];
+
+	const localCandidates = dedupeCandidates([
 		...extractFromInitialState(tweetId),
 		...extractFromDom(),
 		...extractFromPerformance(),
 	]);
-	if (localCandidate) return localCandidate;
 
-	return extractFromMainWorld(url);
+	const mainWorldCandidates = await extractFromMainWorldCandidates(url);
+	return dedupeCandidates([...localCandidates, ...mainWorldCandidates]);
 }
 
 export async function appendXVideoFallback(content: string, pageUrl: string, doc?: Document): Promise<string> {
 	const hasVideoMedia = doc ? hasXVideoMedia(doc) : /<video\b|data-obsidian-clipper-x-video/i.test(content);
-	const candidate = hasVideoMedia ? await extractXVideoCandidate(pageUrl) : null;
+	const candidates = hasVideoMedia ? await extractXVideoCandidates(pageUrl) : [];
+	const candidate = chooseBestCandidate(candidates);
 	const contentWithBlobFallbacks = replaceXBlobVideos(content, pageUrl, candidate);
 	if (contentWithBlobFallbacks !== content) return contentWithBlobFallbacks;
-	let nextContent = content;
-	if (candidate && !nextContent.includes(candidate.url)) {
-		nextContent = insertXVideoSectionNearTweetMedia(nextContent, buildXVideoSection(candidate), pageUrl);
-	}
+	let nextContent = insertXVideoSections(content, candidates, pageUrl);
 
 	if (!hasVideoMedia) return nextContent;
 
@@ -912,16 +1185,82 @@ function buildXVideoSection(candidate: XVideoCandidate): string {
 	return lines.join('');
 }
 
-function insertXVideoSectionNearTweetMedia(content: string, videoSection: string, tweetUrl?: string): string {
+function insertXVideoSections(content: string, candidates: XVideoCandidate[], tweetUrl?: string): string {
+	return dedupeCandidates(candidates).reduce((nextContent, candidate) => {
+		if (!candidate.url || nextContent.includes(candidate.url)) return nextContent;
+		return insertXVideoSectionNearTweetMedia(nextContent, buildXVideoSection(candidate), tweetUrl, candidate);
+	}, content);
+}
+
+function extractXVideoSectionPosterUrl(videoSection: string): string {
+	const poster = videoSection.match(/\bposter=["']([^"']+)["']/i)?.[1]
+		|| videoSection.match(/<img\b[^>]*\bsrc=["']([^"']+)["']/i)?.[1]
+		|| '';
+	return normalizeXMediaImageUrl(poster);
+}
+
+function findXVideoPosterTarget(doc: Document, posterUrl: string): Element | null {
+	if (!posterUrl) return null;
+	for (const image of Array.from(doc.querySelectorAll<HTMLImageElement>('img[src]'))) {
+		const imageUrl = normalizeXMediaImageUrl(image.getAttribute('src') || image.src || '');
+		if (imageUrl !== posterUrl) continue;
+		const fallbackSection = image.closest('[data-obsidian-clipper-x-video]');
+		if (fallbackSection) return fallbackSection;
+		return image.closest('figure, p, section') || image;
+	}
+	return null;
+}
+
+function findXVideoMediaLinkTarget(doc: Document, candidate?: XVideoCandidate): Element | null {
+	if (!candidate?.id) return null;
+	const escapedId = candidate.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const mediaIdPattern = new RegExp(`/media/${escapedId}(?:["'/?#\\s]|$)`, 'i');
+	for (const link of Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
+		const href = link.getAttribute('href') || link.href || '';
+		if (!mediaIdPattern.test(href)) continue;
+		return link.closest('p, figure, section') || link;
+	}
+	return null;
+}
+
+function findXVideoCueTarget(doc: Document): Element | null {
+	const cuePattern = /先看成品|看成品|成品如下|效果如下|效果：|效果:|视频如下|👇/i;
+	return Array.from(doc.querySelectorAll('p'))
+		.find((paragraph) => cuePattern.test(paragraph.textContent || '')) || null;
+}
+
+function insertXVideoSectionNearTweetMedia(
+	content: string,
+	videoSection: string,
+	tweetUrl?: string,
+	candidate?: XVideoCandidate
+): string {
 	try {
 		const parser = new DOMParser();
 		const doc = parser.parseFromString(content, 'text/html');
-		let target: Element | null = null;
+		const template = doc.createElement('template');
+		template.innerHTML = videoSection;
+		const section = template.content.firstElementChild;
+		if (!section) return `${content}<hr>${videoSection}`;
+
+		const posterTarget = findXVideoPosterTarget(doc, extractXVideoSectionPosterUrl(videoSection));
+		if (posterTarget) {
+			posterTarget.replaceWith(section);
+			return doc.body.innerHTML;
+		}
+
+		const mediaLinkTarget = findXVideoMediaLinkTarget(doc, candidate);
+		if (mediaLinkTarget) {
+			mediaLinkTarget.replaceWith(section);
+			return doc.body.innerHTML;
+		}
+
+		let target: Element | null = findXVideoCueTarget(doc);
 		if (tweetUrl) {
 			const exactLink = Array.from(doc.querySelectorAll('a[href]'))
 				.find(link => link.getAttribute('href') === tweetUrl);
 			const tweet = exactLink?.closest('.tweet');
-			target = tweet?.querySelector('.tweet-text') || null;
+			target = target || tweet?.querySelector('.tweet-text') || null;
 		}
 		target = target
 			|| doc.querySelector('.main-tweet .tweet-text')
@@ -929,11 +1268,6 @@ function insertXVideoSectionNearTweetMedia(content: string, videoSection: string
 			|| doc.querySelector('[data-testid="tweetText"]');
 
 		if (!target) return `${content}<hr>${videoSection}`;
-
-		const template = doc.createElement('template');
-		template.innerHTML = videoSection;
-		const section = template.content.firstElementChild;
-		if (!section) return `${content}<hr>${videoSection}`;
 
 		target.insertAdjacentElement('afterend', section);
 		return doc.body.innerHTML;
