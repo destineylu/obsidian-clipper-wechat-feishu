@@ -145,7 +145,7 @@ export function extractDouyinAwemeFromDocument(doc: Document, fallbackUrl = ''):
 	const author = readMetaContent(doc, 'meta[name="author"]')
 		|| readTextContent(doc, '[data-e2e="video-author-name"], .author-name');
 	const images = extractDouyinImagesFromDom(doc);
-	const videoUrl = extractDouyinVideoFromDom(doc);
+	const videoUrl = extractDouyinVideoFromDom(doc) || extractDouyinVideoFromPerformance();
 	const awemeId = parseDouyinAwemeId(fallbackUrl);
 	const structuredHtml = buildDouyinStructuredHtml({
 		title,
@@ -449,6 +449,23 @@ function extractDouyinVideoFromDom(doc: Document): string {
 	return isUsefulDouyinVideoUrl(src) ? normalizeDouyinMediaUrl(src) : '';
 }
 
+function extractDouyinVideoFromPerformance(): string {
+	if (typeof performance === 'undefined' || typeof performance.getEntriesByType !== 'function') return '';
+	const candidates = performance.getEntriesByType('resource')
+		.map(entry => normalizeDouyinMediaUrl(entry.name))
+		.filter(isUsefulDouyinVideoUrl)
+		.sort((left, right) => scoreDouyinVideoUrl(right) - scoreDouyinVideoUrl(left));
+	return uniqueStrings(candidates)[0] || '';
+}
+
+function scoreDouyinVideoUrl(value: string): number {
+	const br = Number(value.match(/[?&]br=(\d+)/i)?.[1] || 0);
+	const bt = Number(value.match(/[?&]bt=(\d+)/i)?.[1] || 0);
+	const videoOnly = /media-video/i.test(value) ? 10_000 : 0;
+	const mp4 = /mime_type=video_mp4|\.mp4(?:[?#]|$)/i.test(value) ? 1_000 : 0;
+	return videoOnly + mp4 + Math.max(br, bt);
+}
+
 function buildDouyinStructuredHtml(input: {
 	title: string;
 	description: string;
@@ -568,6 +585,7 @@ function isHttpUrl(value: string | undefined): value is string {
 function isUsefulDouyinVideoUrl(value: string): boolean {
 	if (!isHttpUrl(value)) return false;
 	if (/blob:/i.test(value)) return false;
+	if (/media-audio|audio_|mime_type=audio|audio\/mp4/i.test(value)) return false;
 	if (!DOUYIN_MEDIA_HOST_PATTERN.test(value)) return false;
 	return /\.(?:mp4|m3u8)(?:[?#]|$)/i.test(value) || /playwm|play|video_id|mime_type=video/i.test(value);
 }

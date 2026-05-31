@@ -133,4 +133,49 @@ describe('Douyin extractor', () => {
 		expect(result?.videoUrl).toBe('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/o0/fallback.mp4');
 		expect(result?.images).toEqual(['https://p3-douyinpic.com/img/fallback.webp']);
 	});
+
+	test('falls back to performance video resources and ignores audio shards', () => {
+		const originalPerformance = globalThis.performance;
+		Object.defineProperty(globalThis, 'performance', {
+			configurable: true,
+			value: {
+				getEntriesByType: (type: string) => type === 'resource' ? [
+					{
+						name: 'https://v5-dy-o-abtest.zjcdn.com/audio/media-audio-und-mp4a/?br=127&mime_type=video_mp4',
+					},
+					{
+						name: 'https://v5-dy-o-abtest.zjcdn.com/video/media-video-avc1/?br=488&mime_type=video_mp4',
+					},
+				] : [],
+			},
+		});
+
+		try {
+			const { document } = parseHTML(`
+				<html>
+					<head>
+						<title>真实页面兜底 - 抖音</title>
+						<meta property="og:description" content="真实页面文案">
+					</head>
+					<body>
+						<video src="blob:https://www.douyin.com/local"></video>
+					</body>
+				</html>
+			`);
+
+			const result = extractDouyinAwemeFromDocument(
+				document as unknown as Document,
+				'https://www.douyin.com/video/7640335756740922633'
+			);
+
+			expect(result?.videoUrl).toBe('https://v5-dy-o-abtest.zjcdn.com/video/media-video-avc1/?br=488&mime_type=video_mp4');
+			expect(result?.videoUrl).not.toContain('media-audio');
+			expect(result?.structuredHtml).toContain('<video controls preload="metadata"');
+		} finally {
+			Object.defineProperty(globalThis, 'performance', {
+				configurable: true,
+				value: originalPerformance,
+			});
+		}
+	});
 });
