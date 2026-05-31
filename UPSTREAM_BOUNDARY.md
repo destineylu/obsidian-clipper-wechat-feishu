@@ -30,6 +30,7 @@ Put platform-specific behavior here:
 - `src/platforms/feishu/*`
 - `src/platforms/wechat/*`
 - `src/platforms/bilibili/*`
+- `src/platforms/douyin/*`
 - `src/platforms/github/*`
 - `src/platforms/x/*`
 - `src/platforms/xiaohongshu/*`
@@ -98,6 +99,28 @@ Validation target:
 - `https://www.xiaohongshu.com/explore/6a007a190000000013020402?xsec_token=AB8-jE6vq2aq1dY0Xni2FxuJDDkroJBL71YkNFiuOAXjw=&xsec_source=pc_feed`
 - Expected video URL pattern: `http://sns-video-zl.xhscdn.com/stream_glo/...mp4?...`
 - Extracted content contains a `<video controls ...>` block before the cover image and does not contain `blob:` video URLs.
+
+### Douyin: video and image posts
+
+Do not rely on Douyin page `<video>` URLs.
+
+The correct approach is:
+
+- Douyin video elements may expose only temporary or page-bound URLs, and short links may need extension-side fetching with current browser cookies.
+- Keep Douyin-specific logic under `src/platforms/douyin/*` and parsing helpers in `src/utils/douyin-extractor.ts`.
+- Prefer structured script data from `RENDER_DATA`, `window._ROUTER_DATA`, and `window.__UNIVERSAL_DATA_FOR_REHYDRATION__`.
+- Recursively find `aweme` objects and choose the exact `aweme_id` from the URL when possible.
+- Extract videos from `video.bit_rate[].play_addr`, `video.play_addr`, and `video.download_addr`, preferring the highest bitrate playable URL.
+- Extract image posts from `image_post_info.images` / `imagePostInfo.images`, filtering avatars, logos, comments, and other page chrome.
+- Render Douyin media as normal block-level document content only: no floating viewer, no extension media page, no overlay. Video should appear before images and should not overlap the image or description blocks.
+
+Validation targets:
+
+- `https://www.douyin.com/video/<aweme_id>`
+- `https://www.douyin.com/note/<aweme_id>`
+- `https://www.iesdouyin.com/share/video/<aweme_id>/`
+- `https://v.douyin.com/<short-code>/`
+- Extracted video content should contain a real media URL and should not contain `blob:` video URLs.
 
 ## Sync Checklist
 

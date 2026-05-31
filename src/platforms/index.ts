@@ -1,4 +1,5 @@
 import { bilibiliPlatform } from './bilibili';
+import { douyinPlatform } from './douyin';
 import { feishuPlatform } from './feishu';
 import { githubPlatform } from './github';
 import { wechatPlatform } from './wechat';
@@ -23,6 +24,7 @@ const platforms: PlatformModule[] = [
 	githubPlatform,
 	feishuPlatform,
 	bilibiliPlatform,
+	douyinPlatform,
 	xiaohongshuPlatform,
 	xPlatform,
 ];

@@ -1,6 +1,6 @@
 # Obsidian Web Clipper（中文内容增强版）
 
-> 本项目基于官方 [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper) 改造，保留官方插件的模板、变量、Reader Mode、同步到 Obsidian 等核心能力，并重点增强 **飞书文档**、**微信公众号文章**、**Bilibili**、**小红书** 和 **X/Twitter** 的内容提取。
+> 本项目基于官方 [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper) 改造，保留官方插件的模板、变量、Reader Mode、同步到 Obsidian 等核心能力，并重点增强 **飞书文档**、**微信公众号文章**、**Bilibili**、**小红书**、**抖音** 和 **X/Twitter** 的内容提取。
 
 [English](./README_EN.md)
 
@@ -10,7 +10,7 @@
 
 本 Fork 的改造重点是：
 
-- 在官方插件基础上增加面向飞书、微信公众号、Bilibili、小红书和 X/Twitter 的站点级提取逻辑
+- 在官方插件基础上增加面向飞书、微信公众号、Bilibili、小红书、抖音和 X/Twitter 的站点级提取逻辑
 - 优先保留官方模板和变量体系，增强后的内容仍然进入原有剪藏流程
 - 对大量媒体内容做保护，避免把过多图片直接内联进 Obsidian 导致卡死
 - 对无法稳定离线保存的视频，保留更可靠的原文播放入口
@@ -77,6 +77,17 @@
 - **视频保存** — 优先从 `window.__INITIAL_STATE__` 中提取真实 `xhscdn.com` MP4 地址，避免保存不可复用的 `blob:` 地址
 - **普通文档流显示** — 视频和图片按独立块级内容写入笔记，不使用悬浮层或中转查看页；视频在前、图片在后，避免错位重叠
 
+### 抖音作品支持
+
+抖音视频和图文页面也会使用动态渲染、短链跳转和临时媒体地址。本 Fork 增加了抖音作品的专用提取逻辑：
+
+- **作品识别** — 支持 `douyin.com/video/...`、`douyin.com/note/...`、`iesdouyin.com/share/video/...`、`iesdouyin.com/share/note/...` 和 `v.douyin.com` 短链
+- **结构化数据优先** — 优先扫描 `RENDER_DATA`、`_ROUTER_DATA`、`__UNIVERSAL_DATA_FOR_REHYDRATION__` 中的 `aweme` 数据
+- **视频保存** — 从 `video.play_addr`、`video.bit_rate[].play_addr` 等字段提取真实播放地址，避免保存不可复用的 `blob:` 地址
+- **图文保存** — 从 `image_post_info.images` 中提取图文作品图片，过滤头像、logo、评论表情等页面装饰图
+- **文案保留** — 保存作者、文案、发布时间、原文链接，并提供 `douyinAwemeId`、`douyinVideo`、`douyinImages` 等模板变量
+- **普通文档流显示** — 视频、图片和文案都作为普通块级内容写入 Obsidian，不使用悬浮层或中转查看页
+
 ### X/Twitter 支持
 
 X/Twitter 的视频也经常只在页面 DOM 中暴露 `blob:` 地址。本 Fork 保留了专门的 X 平台逻辑：
@@ -89,7 +100,7 @@ X/Twitter 的视频也经常只在页面 DOM 中暴露 `blob:` 地址。本 Fork
 
 ### 为什么没有合并到官方项目？
 
-官方维护者[指出](https://github.com/obsidianmd/obsidian-clipper/pull/1)，针对特定网站的内容提取器应该在 [Defuddle](https://github.com/kepano/defuddle)（内容提取库）中实现，而不是在 Web Clipper 扩展本身。飞书、微信公众号、Bilibili、小红书和 X/Twitter 这些平台的提取需要更多站点级兼容逻辑，本 Fork 独立维护这些改造，方便中文内容用户直接使用。
+官方维护者[指出](https://github.com/obsidianmd/obsidian-clipper/pull/1)，针对特定网站的内容提取器应该在 [Defuddle](https://github.com/kepano/defuddle)（内容提取库）中实现，而不是在 Web Clipper 扩展本身。飞书、微信公众号、Bilibili、小红书、抖音和 X/Twitter 这些平台的提取需要更多站点级兼容逻辑，本 Fork 独立维护这些改造，方便中文内容用户直接使用。
 
 ### 如何跟随官方升级？
 

@@ -1,6 +1,6 @@
 # Obsidian Web Clipper (Chinese Content Enhanced)
 
-> This project is built on top of the official [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper). It keeps the official template, variable, Reader Mode, and Obsidian capture workflow, while focusing its custom work on better extraction for **Feishu/Lark documents**, **WeChat Official Account articles**, **Bilibili**, **Xiaohongshu**, and **X/Twitter**.
+> This project is built on top of the official [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper). It keeps the official template, variable, Reader Mode, and Obsidian capture workflow, while focusing its custom work on better extraction for **Feishu/Lark documents**, **WeChat Official Account articles**, **Bilibili**, **Xiaohongshu**, **Douyin**, and **X/Twitter**.
 
 [中文说明](./README.md)
 
@@ -10,7 +10,7 @@ The official Obsidian Web Clipper uses a generic article extractor for most page
 
 This fork focuses on:
 
-- Adding site-specific extraction on top of the official extension for Feishu/Lark, WeChat, Bilibili, Xiaohongshu, and X/Twitter
+- Adding site-specific extraction on top of the official extension for Feishu/Lark, WeChat, Bilibili, Xiaohongshu, Douyin, and X/Twitter
 - Preserving the official template and variable pipeline
 - Protecting Obsidian from very large media-heavy notes
 - Keeping a reliable original-page playback entry for videos that cannot be saved as stable standalone files
@@ -77,6 +77,17 @@ Xiaohongshu video elements often expose only `blob:` playback URLs, which cannot
 - **Video extraction** — Prefers real `xhscdn.com` MP4 URLs from `window.__INITIAL_STATE__` instead of unusable `blob:` URLs
 - **Normal document flow** — Writes videos and images as standalone block-level note content, without floating viewers, extension media pages, or overlays; videos are placed before images to avoid layout overlap
 
+### Douyin post support
+
+Douyin video and image posts rely on dynamic rendering, short links, and temporary media URLs. This fork adds a dedicated Douyin extractor:
+
+- **Post URL support** — Supports `douyin.com/video/...`, `douyin.com/note/...`, `iesdouyin.com/share/video/...`, `iesdouyin.com/share/note/...`, and `v.douyin.com` short links
+- **Structured state first** — Scans `RENDER_DATA`, `_ROUTER_DATA`, and `__UNIVERSAL_DATA_FOR_REHYDRATION__` for `aweme` data
+- **Video extraction** — Reads real playback URLs from `video.play_addr`, `video.bit_rate[].play_addr`, and related fields instead of saving unusable `blob:` URLs
+- **Image post extraction** — Reads image posts from `image_post_info.images` while filtering avatars, logos, comment emojis, and other page chrome
+- **Caption preservation** — Saves author, caption, publish time, original URL, and template variables such as `douyinAwemeId`, `douyinVideo`, and `douyinImages`
+- **Normal document flow** — Writes videos, images, and captions as regular block-level Obsidian note content without floating viewers or extension media pages
+
 ### X/Twitter support
 
 X/Twitter videos also commonly expose only `blob:` URLs in the DOM. This fork keeps dedicated X platform logic:
@@ -89,7 +100,7 @@ X/Twitter videos also commonly expose only `blob:` URLs in the DOM. This fork ke
 
 ### Why not merged upstream?
 
-The official maintainer [indicated](https://github.com/obsidianmd/obsidian-clipper/pull/1) that site-specific content extractors should be implemented in [Defuddle](https://github.com/kepano/defuddle) (the content extraction library), not in the Web Clipper extension itself. Feishu/Lark, WeChat, Bilibili, Xiaohongshu, and X/Twitter require more site-specific compatibility logic, so this fork maintains those changes independently for Chinese content users who need them now.
+The official maintainer [indicated](https://github.com/obsidianmd/obsidian-clipper/pull/1) that site-specific content extractors should be implemented in [Defuddle](https://github.com/kepano/defuddle) (the content extraction library), not in the Web Clipper extension itself. Feishu/Lark, WeChat, Bilibili, Xiaohongshu, Douyin, and X/Twitter require more site-specific compatibility logic, so this fork maintains those changes independently for Chinese content users who need them now.
 
 ### How to follow official updates?
 
