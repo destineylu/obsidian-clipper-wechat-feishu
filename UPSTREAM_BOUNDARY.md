@@ -32,6 +32,7 @@ Put platform-specific behavior here:
 - `src/platforms/bilibili/*`
 - `src/platforms/github/*`
 - `src/platforms/x/*`
+- `src/platforms/xiaohongshu/*`
 
 ## Platform Lessons To Preserve
 
@@ -77,6 +78,26 @@ Validation target:
 - `https://x.com/oggii_0/status/2048997210428440706`
 - Expected video URL pattern: `https://video.twimg.com/ext_tw_video/.../1080x1440/...mp4?...`
 - Extracted content contains `X视频未内联` and at least one `video.twimg.com` URL.
+
+### Xiaohongshu: notes with images and videos
+
+Do not rely on Xiaohongshu page `<video>` URLs.
+
+The correct approach is:
+
+- Xiaohongshu video elements often expose only `blob:https://www.xiaohongshu.com/...`, which is not usable after clipping.
+- Keep Xiaohongshu-specific logic under `src/platforms/xiaohongshu/*` and parsing helpers in `src/utils/xiaohongshu-extractor.ts`.
+- Prefer `window.__INITIAL_STATE__.note.noteDetailMap` for title, author, description, images, tags, and video streams.
+- Extract video URLs from both camelCase `media.stream.*.masterUrl` and snake_case `mediaV2.stream.*.master_url` data.
+- Use hydrated DOM only as a fallback when the initial state is absent or empty.
+- Filter avatar/static UI images so image-only notes do not pick up unrelated page chrome.
+- Render Xiaohongshu media as normal block-level document content only: no floating viewer, no extension media page, no overlay. Video should appear before images and should not overlap the image or description blocks.
+
+Validation target:
+
+- `https://www.xiaohongshu.com/explore/6a007a190000000013020402?xsec_token=AB8-jE6vq2aq1dY0Xni2FxuJDDkroJBL71YkNFiuOAXjw=&xsec_source=pc_feed`
+- Expected video URL pattern: `http://sns-video-zl.xhscdn.com/stream_glo/...mp4?...`
+- Extracted content contains a `<video controls ...>` block before the cover image and does not contain `blob:` video URLs.
 
 ## Sync Checklist
 

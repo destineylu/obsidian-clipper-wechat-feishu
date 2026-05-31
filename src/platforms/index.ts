@@ -2,6 +2,7 @@ import { bilibiliPlatform } from './bilibili';
 import { feishuPlatform } from './feishu';
 import { githubPlatform } from './github';
 import { wechatPlatform } from './wechat';
+import { xiaohongshuPlatform } from './xiaohongshu';
 import { xPlatform } from './x';
 import {
 	PlatformBackgroundContext,
@@ -22,6 +23,7 @@ const platforms: PlatformModule[] = [
 	githubPlatform,
 	feishuPlatform,
 	bilibiliPlatform,
+	xiaohongshuPlatform,
 	xPlatform,
 ];
 

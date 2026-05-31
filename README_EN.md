@@ -1,6 +1,6 @@
 # Obsidian Web Clipper (Chinese Content Enhanced)
 
-> This project is built on top of the official [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper). It keeps the official template, variable, Reader Mode, and Obsidian capture workflow, while focusing its custom work on better extraction for **Feishu/Lark documents** and **WeChat Official Account articles**.
+> This project is built on top of the official [Obsidian Web Clipper](https://github.com/obsidianmd/obsidian-clipper). It keeps the official template, variable, Reader Mode, and Obsidian capture workflow, while focusing its custom work on better extraction for **Feishu/Lark documents**, **WeChat Official Account articles**, **Bilibili**, **Xiaohongshu**, and **X/Twitter**.
 
 [中文说明](./README.md)
 
@@ -10,7 +10,7 @@ The official Obsidian Web Clipper uses a generic article extractor for most page
 
 This fork focuses on:
 
-- Adding site-specific extraction on top of the official extension
+- Adding site-specific extraction on top of the official extension for Feishu/Lark, WeChat, Bilibili, Xiaohongshu, and X/Twitter
 - Preserving the official template and variable pipeline
 - Protecting Obsidian from very large media-heavy notes
 - Keeping a reliable original-page playback entry for videos that cannot be saved as stable standalone files
@@ -67,9 +67,29 @@ Adds **Bilibili video support** in Reader Mode, bringing the same experience as 
 - **Highlight active line** — Highlights the current subtitle line during playback
 - **Cross-browser support** — Works on Chrome and Firefox with proper `Referer` header handling
 
+### Xiaohongshu note support
+
+Xiaohongshu video elements often expose only `blob:` playback URLs, which cannot be reused after clipping. This fork adds a dedicated Xiaohongshu extractor:
+
+- **Note URL support** — Supports `xiaohongshu.com/explore/...`, `xiaohongshu.com/discovery/item/...`, and `xhslink.com`
+- **Text and tags** — Extracts title, author, description, topic tags, and original URL
+- **Image extraction** — Reads real image URLs from structured state or the hydrated page while filtering avatars and static UI placeholders
+- **Video extraction** — Prefers real `xhscdn.com` MP4 URLs from `window.__INITIAL_STATE__` instead of unusable `blob:` URLs
+- **Normal document flow** — Writes videos and images as standalone block-level note content, without floating viewers, extension media pages, or overlays; videos are placed before images to avoid layout overlap
+
+### X/Twitter support
+
+X/Twitter videos also commonly expose only `blob:` URLs in the DOM. This fork keeps dedicated X platform logic:
+
+- **Status URL support** — Supports `x.com/.../status/...` and `twitter.com/.../status/...`
+- **Long posts and threads** — Expands text when possible and preserves same-author thread content
+- **Media order** — Keeps images and media links near the tweet body to reduce missing or misplaced media
+- **Video fallback** — Uses the page main world and X GraphQL data to find `video.twimg.com` MP4 URLs and emits playable/clickable video sections
+- **No manual token setup** — Reuses the current browser page runtime and login/session state when the tweet is viewable
+
 ### Why not merged upstream?
 
-The official maintainer [indicated](https://github.com/obsidianmd/obsidian-clipper/pull/1) that site-specific content extractors should be implemented in [Defuddle](https://github.com/kepano/defuddle) (the content extraction library), not in the Web Clipper extension itself. Feishu/Lark, WeChat, and Bilibili require more site-specific compatibility logic, so this fork maintains those changes independently for Chinese content users who need them now.
+The official maintainer [indicated](https://github.com/obsidianmd/obsidian-clipper/pull/1) that site-specific content extractors should be implemented in [Defuddle](https://github.com/kepano/defuddle) (the content extraction library), not in the Web Clipper extension itself. Feishu/Lark, WeChat, Bilibili, Xiaohongshu, and X/Twitter require more site-specific compatibility logic, so this fork maintains those changes independently for Chinese content users who need them now.
 
 ### How to follow official updates?
 
