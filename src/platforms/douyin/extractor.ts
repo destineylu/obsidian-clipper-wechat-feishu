@@ -1,5 +1,6 @@
 export {
 	extractDouyinAwemeFromDocument,
+	extractDouyinAwemeFromApiResponse,
 	extractDouyinAwemeFromHtml,
 	extractDouyinStructuredContent,
 	isDouyinAwemeUrl,

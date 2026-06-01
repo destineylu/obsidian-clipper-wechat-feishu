@@ -127,6 +127,17 @@ export function extractDouyinAwemeFromHtml(html: string, fallbackUrl = ''): Douy
 	return buildDouyinContentFromAweme(aweme, html, fallbackUrl);
 }
 
+export function extractDouyinAwemeFromApiResponse(responseText: string, fallbackUrl = ''): DouyinAwemeContent | null {
+	const parsed = parseJson(responseText);
+	if (!parsed) return null;
+
+	const awemeId = parseDouyinAwemeId(fallbackUrl);
+	const aweme = chooseDouyinAweme(findDouyinAwemeObjects(parsed), awemeId);
+	if (!aweme) return null;
+
+	return buildDouyinContentFromAweme(aweme, '', fallbackUrl);
+}
+
 export function extractDouyinAwemeFromDocument(doc: Document, fallbackUrl = ''): DouyinAwemeContent | null {
 	const stateContent = extractDouyinAwemeFromHtml(doc.documentElement.outerHTML, fallbackUrl);
 	if (stateContent) return stateContent;
@@ -144,18 +155,21 @@ export function extractDouyinAwemeFromDocument(doc: Document, fallbackUrl = ''):
 	);
 	const author = readMetaContent(doc, 'meta[name="author"]')
 		|| readTextContent(doc, '[data-e2e="video-author-name"], .author-name');
-	const images = extractDouyinImagesFromDom(doc);
+	const domImages = extractDouyinImagesFromDom(doc);
 	const videoUrl = extractDouyinVideoFromDom(doc) || extractDouyinVideoFromPerformance();
+	const images = videoUrl ? [] : domImages;
+	const posterUrl = videoUrl ? domImages[0] || '' : '';
 	const awemeId = parseDouyinAwemeId(fallbackUrl);
 	const structuredHtml = buildDouyinStructuredHtml({
 		title,
 		description,
 		images,
 		videoUrl,
+		posterUrl,
 		url: normalizeDouyinUrl(fallbackUrl),
 	});
 
-	if (!title && !description && !images.length && !videoUrl) return null;
+	if (!title && !description && !domImages.length && !videoUrl) return null;
 
 	return {
 		awemeId,
@@ -166,7 +180,7 @@ export function extractDouyinAwemeFromDocument(doc: Document, fallbackUrl = ''):
 		videoUrl,
 		type: images.length && !videoUrl ? 'image' : 'video',
 		published: '',
-		image: images[0] || '',
+		image: images[0] || posterUrl,
 		structuredHtml,
 		wordCount: countWords(`${title}\n${description}`),
 	};
@@ -179,15 +193,48 @@ export async function extractDouyinStructuredContent(
 ): Promise<DouyinAwemeContent | null> {
 	if (!isDouyinAwemeUrl(url)) return null;
 
-	const localContent = extractDouyinAwemeFromHtml(doc.documentElement.outerHTML, url)
-		|| extractDouyinAwemeFromDocument(doc, url);
+	const localContent = extractDouyinAwemeFromHtml(doc.documentElement.outerHTML, url);
 	if (localContent) return localContent;
+
+	const apiContent = fetchHtml ? await extractDouyinAwemeFromPerformanceApi(url, fetchHtml) : null;
+	if (apiContent) return apiContent;
+
+	const domContent = extractDouyinAwemeFromDocument(doc, url);
+	if (domContent) return domContent;
 
 	const fetchedHtml = fetchHtml ? await fetchHtml(url).catch(() => '') : '';
 	if (!fetchedHtml) return null;
 
 	return extractDouyinAwemeFromHtml(fetchedHtml, url)
 		|| extractDouyinAwemeFromFetchedHtml(fetchedHtml, url);
+}
+
+async function extractDouyinAwemeFromPerformanceApi(
+	fallbackUrl: string,
+	fetchText: (url: string) => Promise<string>
+): Promise<DouyinAwemeContent | null> {
+	for (const apiUrl of extractDouyinAwemeApiUrlsFromPerformance(fallbackUrl)) {
+		const responseText = await fetchText(apiUrl).catch(() => '');
+		if (!responseText) continue;
+		const content = extractDouyinAwemeFromApiResponse(responseText, fallbackUrl);
+		if (content) return content;
+	}
+	return null;
+}
+
+function extractDouyinAwemeApiUrlsFromPerformance(fallbackUrl: string): string[] {
+	if (typeof performance === 'undefined' || typeof performance.getEntriesByType !== 'function') return [];
+
+	const awemeId = parseDouyinAwemeId(fallbackUrl);
+	return uniqueStrings(
+		performance.getEntriesByType('resource')
+			.map(entry => normalizeDouyinMediaUrl(entry.name))
+			.filter((entryUrl) => {
+				if (!isHttpUrl(entryUrl)) return false;
+				if (!/\/aweme\/v1\/web\/aweme\/detail\//i.test(entryUrl)) return false;
+				return !awemeId || entryUrl.includes(`aweme_id=${awemeId}`);
+			})
+	);
 }
 
 function extractDouyinJsonRoots(html: string): unknown[] {
@@ -329,6 +376,7 @@ function chooseDouyinAweme(awemes: DouyinRawAweme[], expectedId: string): Douyin
 	if (expectedId) {
 		const exact = unique.find(aweme => getDouyinAwemeId(aweme) === expectedId);
 		if (exact) return exact;
+		return null;
 	}
 	return unique.sort((left, right) => scoreDouyinAweme(right) - scoreDouyinAweme(left))[0] || null;
 }
@@ -345,6 +393,7 @@ function buildDouyinContentFromAweme(aweme: DouyinRawAweme, html: string, fallba
 	const description = cleanDouyinText(aweme.desc || aweme.description || '');
 	const images = extractDouyinImages(aweme);
 	const videoUrl = extractDouyinVideoUrl(aweme);
+	const cover = extractDouyinCover(aweme);
 	const title = cleanDouyinTitle(
 		description.split('\n').find(Boolean)
 		|| readHtmlTitle(html)
@@ -357,6 +406,7 @@ function buildDouyinContentFromAweme(aweme: DouyinRawAweme, html: string, fallba
 		description,
 		images,
 		videoUrl,
+		posterUrl: images[0] || cover,
 		url: normalizeDouyinUrl(fallbackUrl || (awemeId ? `https://www.douyin.com/video/${awemeId}` : '')),
 	});
 
@@ -369,7 +419,7 @@ function buildDouyinContentFromAweme(aweme: DouyinRawAweme, html: string, fallba
 		videoUrl,
 		type: images.length && !videoUrl ? 'image' : 'video',
 		published,
-		image: images[0] || extractDouyinCover(aweme) || '',
+		image: images[0] || cover || '',
 		structuredHtml,
 		wordCount: countWords(`${title}\n${description}`),
 	};
@@ -471,13 +521,16 @@ function buildDouyinStructuredHtml(input: {
 	description: string;
 	images: string[];
 	videoUrl: string;
+	posterUrl?: string;
 	url: string;
 }): string {
 	const sections: string[] = ['<section class="douyin-structured-content">'];
 
 	if (input.videoUrl) {
 		sections.push('<section class="douyin-video">');
-		sections.push(`<video controls preload="metadata" src="${escapeHtmlAttribute(input.videoUrl)}" style="display:block;max-width:100%;height:auto;width:100%;"></video>`);
+		const poster = input.posterUrl ? ` poster="${escapeHtmlAttribute(input.posterUrl)}"` : '';
+		sections.push(`<video controls preload="metadata" src="${escapeHtmlAttribute(input.videoUrl)}"${poster} style="display:block;max-width:100%;height:auto;width:100%;"></video>`);
+		sections.push(`<p><a href="${escapeHtmlAttribute(input.videoUrl)}">打开视频文件</a></p>`);
 		sections.push('</section>');
 	}
 
