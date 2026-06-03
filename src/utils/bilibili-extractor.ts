@@ -1,5 +1,3 @@
-import browser from './browser-polyfill';
-
 export interface BilibiliParsedUrl {
 	bvid: string | null;
 	aid: number | null;
@@ -214,8 +212,20 @@ export function buildBilibiliStructuredHtml(input: {
 	description: string;
 	chapters: BilibiliChapter[];
 	transcript: BilibiliTranscriptCue[];
+	bvid?: string;
+	aid?: number | null;
+	cid?: number | null;
+	page?: number;
 }): string {
 	const sections: string[] = ['<section class="bilibili-structured-content">'];
+
+	const embedHtml = buildBilibiliEmbedHtml(input);
+	if (embedHtml) {
+		sections.push('<section class="bilibili-section bilibili-video">');
+		sections.push('<h2>视频</h2>');
+		sections.push(embedHtml);
+		sections.push('</section>');
+	}
 
 	if (input.description.trim()) {
 		sections.push('<section class="bilibili-section bilibili-description">');
@@ -260,6 +270,35 @@ export function buildBilibiliStructuredHtml(input: {
 
 	sections.push('</section>');
 	return sections.join('');
+}
+
+/**
+ * 生成可保存进 Obsidian 笔记正文的 B 站播放器 iframe。
+ */
+export function buildBilibiliEmbedHtml(input: {
+	bvid?: string;
+	aid?: number | null;
+	cid?: number | null;
+	page?: number;
+}): string {
+	const bvid = String(input.bvid || '').trim();
+	const cid = typeof input.cid === 'number' && Number.isFinite(input.cid) ? input.cid : null;
+	if (!bvid || !cid) return '';
+
+	const params = new URLSearchParams({
+		bvid,
+		cid: String(cid),
+		page: String(input.page && input.page > 0 ? Math.floor(input.page) : 1),
+		autoplay: '0',
+		danmaku: '0',
+		high_quality: '1'
+	});
+	if (typeof input.aid === 'number' && Number.isFinite(input.aid)) {
+		params.set('aid', String(input.aid));
+	}
+
+	const src = `https://player.bilibili.com/player.html?${params.toString()}`;
+	return `<iframe src="${escapeHtml(src)}" scrolling="no" border="0" frameborder="no" framespacing="0" allow="fullscreen; picture-in-picture; encrypted-media" allowfullscreen="true" style="display:block;width:100%;aspect-ratio:16 / 9;border:0;"></iframe>`;
 }
 
 /**
@@ -320,7 +359,11 @@ export async function extractBilibiliStructuredContent(doc: Document): Promise<B
 	const structuredHtml = buildBilibiliStructuredHtml({
 		description,
 		chapters,
-		transcript
+		transcript,
+		bvid: viewData.bvid || parsedUrl.bvid || '',
+		aid: viewData.aid ?? parsedUrl.aid,
+		cid: resolvedPage.cid,
+		page: resolvedPage.page
 	});
 	const wordCount = `${description}\n${transcriptText}`.trim().split(/\s+/).filter(Boolean).length;
 
@@ -348,6 +391,7 @@ export async function extractBilibiliStructuredContent(doc: Document): Promise<B
  * 通过 background 代理抓取 B 站 JSON，避免内容脚本直接跨域请求失败。
  */
 async function fetchBilibiliJson(url: string): Promise<any> {
+	const browser = require('./browser-polyfill').default as typeof import('./browser-polyfill').default;
 	const response = await browser.runtime.sendMessage({
 		action: 'fetchBilibiliJson',
 		url
