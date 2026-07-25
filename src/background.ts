@@ -1,12 +1,14 @@
 import browser from 'webextension-polyfill';
 import { detectBrowser } from './utils/browser-detection';
-import { updateCurrentActiveTab, isValidUrl, isBlankPage } from './utils/active-tab-manager';
+import { updateCurrentActiveTab, isValidUrl, isBlankPage, isNormalPageUrl } from './utils/active-tab-manager';
 import { TextHighlightData } from './utils/highlighter';
 import { debounce } from './utils/debounce';
 import { Settings } from './types/types';
+import { debugLog } from './utils/debug';
 import { registerPlatformBackgroundHandlers } from './platforms';
 
 const YOUTUBE_EMBED_RULE_ID = 9001;
+const YOUTUBE_INNERTUBE_RULE_ID = 9002;
 
 // Chrome: declarativeNetRequest to rewrite Referer on YouTube embeds.
 // Safari/Firefox use the native video element instead (see reader.ts).
@@ -39,48 +41,72 @@ async function disableYouTubeEmbedRule(): Promise<void> {
 	});
 }
 
-function isExtensionOrBrowserPage(url: string): boolean {
-	return url.startsWith('chrome-extension://')
-		|| url.startsWith('moz-extension://')
-		|| url.startsWith('edge://')
-		|| url.startsWith('chrome://')
-		|| url.startsWith('about:')
-		|| url.startsWith('devtools://');
+// Set Origin header on YouTube innertube API requests from the extension.
+// YouTube doesn't accept chrome-extension://...
+async function enableYouTubeInnertubeRule(): Promise<void> {
+	const dnr = (typeof chrome !== 'undefined' && chrome.declarativeNetRequest)
+		|| (typeof browser !== 'undefined' && (browser as any).declarativeNetRequest);
+	if (!dnr) return;
+	try {
+		await dnr.updateSessionRules({
+			removeRuleIds: [YOUTUBE_INNERTUBE_RULE_ID],
+			addRules: [{
+				id: YOUTUBE_INNERTUBE_RULE_ID,
+				priority: 1,
+				action: {
+					type: 'modifyHeaders' as any,
+					requestHeaders: [
+						{ header: 'Origin', operation: 'set' as any, value: 'https://www.youtube.com' },
+						{ header: 'Referer', operation: 'set' as any, value: 'https://www.youtube.com/' },
+					]
+				},
+				condition: {
+					urlFilter: '||youtube.com/youtubei/',
+					resourceTypes: ['xmlhttprequest' as any],
+					initiatorDomains: [chrome?.runtime?.id || ''].filter(Boolean),
+				}
+			}]
+		});
+	} catch { /* Firefox/Safari use webRequest or native messaging instead */ }
 }
 
-function isClipworthyTab(tab: browser.Tabs.Tab | undefined): tab is browser.Tabs.Tab & { id: number; url: string } {
-	return !!(tab?.id && tab.url && isValidUrl(tab.url) && !isBlankPage(tab.url));
-}
+// Firefox/Safari: use webRequest.onBeforeSendHeaders to set Origin/Referer on
+// YouTube innertube requests. Fallback for browsers where declarativeNetRequest
+// doesn't work or isn't supported.
+if (typeof browser !== 'undefined' && browser.webRequest?.onBeforeSendHeaders) {
+	try {
+		browser.webRequest.onBeforeSendHeaders.addListener(
+			(details) => {
+				// Only modify requests from tabs showing extension pages
+				if (details.tabId && details.tabId > 0) {
+					// Check asynchronously would be complex — instead check
+					// if the request has an extension origin or referer
+					const refHeader = details.requestHeaders?.find(h => h.name.toLowerCase() === 'referer');
+					const refValue = refHeader?.value || '';
+					const originHeader = details.requestHeaders?.find(h => h.name.toLowerCase() === 'origin');
+					const originValue = originHeader?.value || '';
+					const isFromExtension = refValue.startsWith('moz-extension://') || originValue.startsWith('moz-extension://')
+						|| refValue.startsWith('safari-web-extension://') || originValue.startsWith('safari-web-extension://');
+					if (!isFromExtension) return { requestHeaders: details.requestHeaders };
+				}
 
-async function getPreferredActiveTab(): Promise<(browser.Tabs.Tab & { id: number; url: string }) | undefined> {
-	const candidateGroups = await Promise.all([
-		browser.tabs.query({ active: true, lastFocusedWindow: true }),
-		browser.tabs.query({ active: true, currentWindow: true }),
-		browser.tabs.query({ active: true }),
-	]);
-
-	for (const tabs of candidateGroups) {
-		const clipworthyTab = tabs.find(isClipworthyTab);
-		if (clipworthyTab) {
-			return clipworthyTab;
-		}
-	}
-
-	for (const tabs of candidateGroups) {
-		const fallbackTab = tabs.find(tab => tab.id && tab.url && !isExtensionOrBrowserPage(tab.url));
-		if (fallbackTab?.id && fallbackTab.url) {
-			return fallbackTab as browser.Tabs.Tab & { id: number; url: string };
-		}
-	}
-
-	for (const tabs of candidateGroups) {
-		const firstTab = tabs.find((tab): tab is browser.Tabs.Tab & { id: number; url: string } => !!(tab.id && tab.url));
-		if (firstTab) {
-			return firstTab;
-		}
-	}
-
-	return undefined;
+				const headers = details.requestHeaders || [];
+				const setHeader = (name: string, value: string) => {
+					const existing = headers.find(h => h.name.toLowerCase() === name.toLowerCase());
+					if (existing) {
+						existing.value = value;
+					} else {
+						headers.push({ name, value });
+					}
+				};
+				setHeader('Origin', 'https://www.youtube.com');
+				setHeader('Referer', 'https://www.youtube.com/');
+				return { requestHeaders: headers };
+			},
+			{ urls: ['*://www.youtube.com/*'] },
+			['blocking', 'requestHeaders']
+		);
+	} catch { /* webRequest not available */ }
 }
 
 let sidePanelOpenWindows: Set<number> = new Set();
@@ -93,16 +119,16 @@ const handlePlatformBackgroundMessage = registerPlatformBackgroundHandlers();
 
 async function injectContentScript(tabId: number): Promise<void> {
 	if (browser.scripting) {
-		console.log('[Obsidian Clipper] Using scripting API');
+		debugLog('Clipper', 'Using scripting API');
 		await browser.scripting.executeScript({
 			target: { tabId },
 			files: ['content.js']
 		});
 	} else {
-		console.log('[Obsidian Clipper] Using tabs.executeScript fallback');
+		debugLog('Clipper', 'Using tabs.executeScript fallback');
 		await browser.tabs.executeScript(tabId, { file: 'content.js' });
 	}
-	console.log('[Obsidian Clipper] Injection completed, waiting for init...');
+	debugLog('Clipper', 'Injection completed, waiting for init...');
 
 	// Poll until the content script responds, rather than a fixed delay.
 	// Try immediately after injection, then back off with 50ms sleeps.
@@ -120,7 +146,7 @@ async function injectContentScript(tabId: number): Promise<void> {
 	if (!ready) {
 		throw new Error('Content script did not respond after injection');
 	}
-	console.log('[Obsidian Clipper] Post-injection ping succeeded');
+	debugLog('Clipper', 'Post-injection ping succeeded');
 }
 
 async function ensureContentScriptLoadedInBackground(tabId: number): Promise<void> {
@@ -135,7 +161,7 @@ async function ensureContentScriptLoadedInBackground(tabId: number): Promise<voi
 
 		// Attempt to send a message to the content script
 		await browser.tabs.sendMessage(tabId, { action: "ping" });
-		console.log('[Obsidian Clipper] Content script ping succeeded');
+		debugLog('Clipper', 'Content script ping succeeded');
 	} catch (error) {
 		// If the error is about invalid URL, re-throw it
 		if (error instanceof Error && error.message.includes('invalid URL')) {
@@ -143,8 +169,24 @@ async function ensureContentScriptLoadedInBackground(tabId: number): Promise<voi
 		}
 
 		// If the message fails, the content script is not loaded, so inject it
-		console.log('[Obsidian Clipper] Ping failed, injecting content script...', error);
+		debugLog('Clipper', 'Ping failed, injecting content script...', error);
 		await injectContentScript(tabId);
+	}
+}
+
+// Route a message to a tab, handling both normal pages (via content script)
+// and extension pages like the reader page (via runtime.sendMessage forwarding).
+async function routeMessageToTab(tabId: number, message: any): Promise<any> {
+	const tab = await browser.tabs.get(tabId);
+	if (isNormalPageUrl(tab.url)) {
+		await ensureContentScriptLoadedInBackground(tabId);
+		return browser.tabs.sendMessage(tabId, message);
+	} else {
+		return browser.runtime.sendMessage({
+			action: 'extensionPageMessage',
+			targetTabId: tabId,
+			message
+		});
 	}
 }
 
@@ -154,6 +196,40 @@ function getHighlighterModeForTab(tabId: number): boolean {
 
 function getReaderModeForTab(tabId: number): boolean {
 	return readerModeState[tabId] ?? false;
+}
+
+function isReaderPageUrl(url: string | undefined): string | null {
+	if (!url) return null;
+	const readerPagePrefix = browser.runtime.getURL('reader.html');
+	if (url.startsWith(readerPagePrefix)) {
+		try {
+			const parsed = new URL(url);
+			return parsed.searchParams.get('url');
+		} catch {}
+	}
+	return null;
+}
+
+async function exitReaderPageIfNeeded(tabId: number, readerUrl?: string): Promise<boolean> {
+	let originalUrl: string | null = null;
+	try {
+		const tab = await browser.tabs.get(tabId);
+		originalUrl = isReaderPageUrl(tab.url);
+	} catch {}
+
+	// Fallback: the embedded clipper passes the reader URL when
+	// tabs.get() can't access the extension page URL
+	if (!originalUrl && readerUrl) {
+		originalUrl = isReaderPageUrl(readerUrl);
+	}
+
+	if (originalUrl) {
+		await browser.tabs.update(tabId, { url: originalUrl });
+		readerModeState[tabId] = false;
+		debouncedUpdateContextMenu(tabId);
+		return true;
+	}
+	return false;
 }
 
 async function initialize() {
@@ -169,10 +245,13 @@ async function initialize() {
 		// Initialize context menu
 		await debouncedUpdateContextMenu(-1);
 
+		// Enable Origin header for YouTube innertube API requests
+		await enableYouTubeInnertubeRule();
+
 		// Set up action popup based on openBehavior setting
 		await updateActionPopup();
 
-		console.log('Background script initialized successfully');
+		debugLog('Clipper', 'Background script initialized successfully');
 	} catch (error) {
 		console.error('Error initializing background script:', error);
 	}
@@ -207,9 +286,56 @@ async function sendMessageToPopup(tabId: number, message: any): Promise<void> {
 
 
 
+// Safari: route fetch through native messaging (URLSession in Swift).
+// Called from the background script where sendNativeMessage works reliably.
+async function nativeFetch(url: string, options?: any): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
+	try {
+		const result = await browser.runtime.sendNativeMessage('application.id', {
+			type: 'fetchRequest',
+			url,
+			method: options?.method || 'GET',
+			headers: options?.headers || {},
+			body: options?.body || null,
+		}) as { ok: boolean; status: number; text: string; error?: string };
+		return result || { ok: false, status: 0, text: '', error: 'Empty native response' };
+	} catch (err) {
+		return { ok: false, status: 0, text: '', error: (err as Error).message };
+	}
+}
+
+// Fetch proxy for extension pages (reader, highlights).
+// Returns a Promise for the webextension-polyfill.
+// On Firefox MV3, host_permissions require explicit user grant —
+// callers detect CORS_PERMISSION_NEEDED and prompt via permissions.request().
+browser.runtime.onMessage.addListener((request: unknown) => {
+	if (typeof request !== 'object' || request === null) return;
+	if ((request as any).action !== 'fetchProxy') return;
+	const { url, options } = request as { url: string; options?: any };
+	const fetchOptions: RequestInit = {};
+	if (options?.method) fetchOptions.method = options.method;
+	if (options?.headers) fetchOptions.headers = options.headers;
+	if (options?.body) fetchOptions.body = options.body;
+	return fetch(url, fetchOptions)
+		.then(async (resp) => {
+			const text = await resp.text();
+			// If YouTube returns bot-detection HTML, try native messaging (Safari)
+			if (!resp.ok && (text.includes('Sorry') || text.includes('<html')) && typeof browser.runtime.sendNativeMessage === 'function') {
+				return nativeFetch(url, options);
+			}
+			return { ok: resp.ok, status: resp.status, text, finalUrl: resp.url };
+		})
+		.catch(async () => {
+			// CORS failure — try native messaging (Safari), else report permission needed
+			if (typeof browser.runtime.sendNativeMessage === 'function') {
+				return nativeFetch(url, options);
+			}
+			return { ok: false, status: 0, text: '', error: 'CORS_PERMISSION_NEEDED' };
+		});
+});
+
 browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime.MessageSender, sendResponse: (response?: any) => void): true | undefined => {
 	if (typeof request === 'object' && request !== null) {
-		const typedRequest = request as { action: string; isActive?: boolean; hasHighlights?: boolean; tabId?: number; text?: string; section?: string; url?: string };
+		const typedRequest = request as { action: string; isActive?: boolean; hasHighlights?: boolean; tabId?: number; text?: string; section?: string; readerUrl?: string; url?: string };
 		
 		if (typedRequest.action === 'copy-to-clipboard' && typedRequest.text) {
 			// Use content script to copy to clipboard
@@ -235,6 +361,8 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			});
 			return true;
 		}
+
+		// fetchProxy is handled by a separate listener below
 
 		if (typedRequest.action === "extractContent" && sender.tab && sender.tab.id) {
 			browser.tabs.sendMessage(sender.tab.id, request).then(sendResponse);
@@ -363,34 +491,37 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 		}
 
 		if (typedRequest.action === "toggleReaderMode" && typedRequest.tabId) {
-			injectReaderScript(typedRequest.tabId).then(() => {
-				browser.tabs.sendMessage(typedRequest.tabId!, { action: "toggleReaderMode" })
-					.then((response: any) => {
-						if (response?.success) {
-							readerModeState[typedRequest.tabId!] = response.isActive ?? false;
-							debouncedUpdateContextMenu(typedRequest.tabId!);
-						}
-						sendResponse(response);
-					})
-					.catch(() => {
-						// Page may have reloaded before responding (reader restore)
-						sendResponse({ success: true, isActive: false });
-					});
+			const tabId = typedRequest.tabId;
+			// Check if the tab is on the extension's reader.html page
+			exitReaderPageIfNeeded(tabId, typedRequest.readerUrl).then((wasReaderPage) => {
+				if (wasReaderPage) {
+					sendResponse({ success: true, isActive: false });
+					return;
+				}
+				injectReaderScript(tabId).then(() => {
+					browser.tabs.sendMessage(tabId, { action: "toggleReaderMode" })
+						.then((response: any) => {
+							if (response?.success) {
+								readerModeState[tabId] = response.isActive ?? false;
+								debouncedUpdateContextMenu(tabId);
+							}
+							sendResponse(response);
+						})
+						.catch(() => {
+							// Page may have reloaded before responding (reader restore)
+							sendResponse({ success: true, isActive: false });
+						});
+				});
 			});
 			return true;
 		}
 
 		if (typedRequest.action === "getActiveTabAndToggleIframe") {
-			getPreferredActiveTab().then(async (currentTab) => {
-				if (currentTab) {
+			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
+				const currentTab = tabs[0];
+				if (currentTab && currentTab.id) {
 					try {
-						if (!currentTab.url || !isValidUrl(currentTab.url) || isBlankPage(currentTab.url)) {
-							sendResponse({success: false, error: 'Cannot open iframe on this page'});
-							return;
-						}
-
-						await ensureContentScriptLoadedInBackground(currentTab.id);
-						await browser.tabs.sendMessage(currentTab.id, { action: "toggle-iframe" });
+						await routeMessageToTab(currentTab.id, { action: "toggle-iframe" });
 						sendResponse({success: true});
 					} catch (error) {
 						console.error('Error sending toggle-iframe message:', error);
@@ -405,9 +536,8 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 
 		if (typedRequest.action === "toggleIframe") {
 			const tab = sender.tab;
-			if (tab?.id && tab.url && isValidUrl(tab.url) && !isBlankPage(tab.url)) {
-				ensureContentScriptLoadedInBackground(tab.id)
-					.then(() => browser.tabs.sendMessage(tab.id!, { action: "toggle-iframe" }))
+			if (tab?.id) {
+				routeMessageToTab(tab.id, { action: "toggle-iframe" })
 					.then(() => sendResponse({ success: true }))
 					.catch((error) => {
 						console.error('Error toggling iframe:', error);
@@ -420,8 +550,16 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 		}
 
 		if (typedRequest.action === "getActiveTab") {
-			getPreferredActiveTab().then((currentTab) => {
-				if (currentTab?.id) {
+			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
+				let currentTab = tabs[0];
+				// Fallback for when currentWindow has no tabs (e.g., debugging popup in DevTools)
+				if (!currentTab || !currentTab.id) {
+					const allActiveTabs = await browser.tabs.query({active: true});
+					currentTab = allActiveTabs.find(tab =>
+						tab.id && tab.url && !tab.url.startsWith('chrome-extension://') && !tab.url.startsWith('moz-extension://')
+					) || allActiveTabs[0];
+				}
+				if (currentTab && currentTab.id) {
 					sendResponse({tabId: currentTab.id});
 				} else {
 					sendResponse({error: 'No active tab found'});
@@ -449,6 +587,14 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			return true;
 		}
 
+		if (typedRequest.action === "openHighlights") {
+			const domain = (typedRequest as any).domain;
+			const query = domain ? `?domain=${encodeURIComponent(domain)}` : '';
+			browser.tabs.create({ url: browser.runtime.getURL(`highlights.html${query}`) });
+			sendResponse({ success: true });
+			return true;
+		}
+
 		if (typedRequest.action === "openSettings") {
 			try {
 				const section = typedRequest.section ? `?section=${typedRequest.section}` : '';
@@ -465,26 +611,23 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 
 		if (typedRequest.action === "copyMarkdownToClipboard" || typedRequest.action === "saveMarkdownToFile") {
 			if (sender.tab?.id) {
-				(async () => {
-					try {
-						await ensureContentScriptLoadedInBackground(sender.tab!.id!);
-						await browser.tabs.sendMessage(sender.tab!.id!, { action: typedRequest.action });
-						sendResponse({success: true});
-					} catch (error) {
-						sendResponse({success: false, error: error instanceof Error ? error.message : String(error)});
-					}
-				})();
+				routeMessageToTab(sender.tab.id, { action: typedRequest.action })
+					.then(() => sendResponse({success: true}))
+					.catch((error) => sendResponse({success: false, error: error instanceof Error ? error.message : String(error)}));
 				return true;
 			}
 		}
 
 		if (typedRequest.action === "getTabInfo") {
 			browser.tabs.get(typedRequest.tabId as number).then((tab) => {
+				// For reader page tabs, return the article URL so the
+				// clipper treats it as a normal web page
+				const url = isReaderPageUrl(tab.url) ?? tab.url;
 				sendResponse({
 					success: true,
 					tab: {
 						id: tab.id,
-						url: tab.url
+						url: url
 					}
 				});
 			}).catch((error) => {
@@ -517,12 +660,7 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			const tabId = (typedRequest as any).tabId;
 			const message = (typedRequest as any).message;
 			if (tabId && message) {
-				// Ensure content script is loaded before sending message
-				ensureContentScriptLoadedInBackground(tabId).then(() => {
-					console.log('[Obsidian Clipper] Sending message to tab:', message.action);
-					return browser.tabs.sendMessage(tabId, message);
-				}).then((response) => {
-					console.log('[Obsidian Clipper] Tab response:', response ? 'has content=' + !!((response as any).content) : response);
+				routeMessageToTab(tabId, message).then((response) => {
 					sendResponse(response);
 				}).catch((error) => {
 					console.error('[Obsidian Clipper] Error sending message to tab:', error);
@@ -539,6 +677,19 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 				});
 				return true;
 			}
+		}
+
+		if (typedRequest.action === "openReaderPage") {
+			const articleUrl = (typedRequest as any).url;
+			if (articleUrl && sender.tab?.id) {
+				const readerUrl = browser.runtime.getURL('reader.html?url=' + encodeURIComponent(articleUrl));
+				browser.tabs.update(sender.tab.id, { url: readerUrl })
+					.then(() => sendResponse({ success: true }))
+					.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			} else {
+				sendResponse({ success: false, error: 'Missing URL or tab' });
+			}
+			return true;
 		}
 
 		if (typedRequest.action === "openObsidianUrl") {

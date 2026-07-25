@@ -1,13 +1,17 @@
 import browser from './utils/browser-polyfill';
 import * as highlighter from './utils/highlighter';
+import { removeExistingHighlights } from './utils/highlighter-overlays';
 import { loadSettings, generalSettings } from './utils/storage-utils';
-import Defuddle from 'defuddle';
 import { getDomain } from './utils/string-utils';
 import { extractContentBySelector as extractContentBySelectorShared } from './utils/shared';
+import Defuddle from 'defuddle';
 import { createMarkdownContent } from 'defuddle/full';
 import { flattenShadowDom } from './utils/flatten-shadow-dom';
+import { serializeChildren } from './utils/dom-utils';
 import { saveFile } from './utils/file-utils';
 import { debugLog } from './utils/debug';
+import { updateSidebarWidth, addResizeHandle, cleanupResizeHandlers } from './utils/iframe-resize';
+import { parseForClip } from './utils/clip-utils';
 import { platformRegistry } from './platforms';
 
 declare global {
@@ -27,45 +31,31 @@ declare global {
 
 	debugLog('Clipper', 'Initializing content script, generation', myGeneration);
 
-	// In Reader mode, extract from the article's original HTML (before
-	// wireTranscript restructures it) with a neutral URL so site-specific
-	// extractors don't re-fetch content (e.g. YouTube)
-	async function parseForClip(doc: Document) {
-		const url = doc.URL || location.href;
-		const readerArticle = doc.querySelector('.obsidian-reader-active .obsidian-reader-content article');
-		if (readerArticle) {
-			const readerDoc = doc.implementation.createHTMLDocument();
-			const originalHtml = readerArticle.getAttribute('data-original-html');
-			readerDoc.body.innerHTML = originalHtml || readerArticle.innerHTML;
-			await platformRegistry.beforeDomNormalize({ document: readerDoc, url });
-			const parsed = new Defuddle(readerDoc, { url: '' }).parse();
-			return platformRegistry.afterExtract({ document: readerDoc, parsed, url });
-		}
-		await platformRegistry.beforeDomNormalize({ document: doc, url });
-		const parsed = new Defuddle(doc, { url: doc.URL }).parse();
-		return platformRegistry.afterExtract({ document: doc, parsed, url });
+	function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, fallback: T): Promise<T> {
+		let timeoutId: number | undefined;
+		const timeout = new Promise<T>(resolve => {
+			timeoutId = window.setTimeout(() => {
+				console.warn(`[Obsidian Clipper] ${label} timed out after ${timeoutMs}ms`);
+				resolve(fallback);
+			}, timeoutMs);
+		});
+		return Promise.race([promise, timeout]).finally(() => {
+			if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+		});
+	}
+
+	function isXStatusPage(url: string): boolean {
+		return /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(url);
 	}
 
 	let isHighlighterMode = false;
 	const iframeId = 'obsidian-clipper-iframe';
 	const containerId = 'obsidian-clipper-container';
 
-	let sidebarWidthRaf: number | null = null;
-
-	function updateSidebarWidth(container: HTMLElement | null) {
-		if (sidebarWidthRaf) cancelAnimationFrame(sidebarWidthRaf);
-		sidebarWidthRaf = requestAnimationFrame(() => {
-			if (container && document.contains(container)) {
-				document.documentElement.style.setProperty('--clipper-sidebar-width', `${container.offsetWidth + 24}px`);
-			} else {
-				document.documentElement.style.removeProperty('--clipper-sidebar-width');
-			}
-		});
-	}
-
 	function removeContainer(container: HTMLElement) {
 		container.classList.add('is-closing');
-		updateSidebarWidth(null);
+		updateSidebarWidth(document, null);
+		cleanupResizeHandlers(document);
 		container.addEventListener('animationend', () => {
 			container.remove();
 			highlighter.repositionHighlights();
@@ -95,107 +85,21 @@ declare global {
 
 		const iframe = document.createElement('iframe');
 		iframe.id = iframeId;
+		iframe.allow = 'clipboard-write; web-share';
 		iframe.src = browser.runtime.getURL('side-panel.html?context=iframe');
 		container.appendChild(iframe);
 
-		// Add resize handle (left side only)
-		const handle = document.createElement('div');
-		handle.className = `obsidian-clipper-resize-handle obsidian-clipper-resize-handle-w`;
-		container.appendChild(handle);
-		addResizeListener(container, handle, 'w');
-
-		const southHandle = document.createElement('div');
-		southHandle.className = `obsidian-clipper-resize-handle obsidian-clipper-resize-handle-s`;
-		container.appendChild(southHandle);
-		addResizeListener(container, southHandle, 's');
-
-		const southWestHandle = document.createElement('div');
-		southWestHandle.className = 'obsidian-clipper-resize-handle obsidian-clipper-resize-handle-sw';
-		container.appendChild(southWestHandle);
-		addResizeListener(container, southWestHandle, 'sw');
+		const resizeCallbacks = {
+			onResize: () => highlighter.repositionHighlights(),
+			onResizeEnd: () => highlighter.repositionHighlights(),
+		};
+		addResizeHandle(document, container, 'w', resizeCallbacks);
+		addResizeHandle(document, container, 's', resizeCallbacks);
+		addResizeHandle(document, container, 'sw', resizeCallbacks);
 
 		document.body.appendChild(container);
-		updateSidebarWidth(container);
-		container.addEventListener('animationend', () => {
-			highlighter.repositionHighlights();
-		}, { once: true });
-	}
-
-	function addResizeListener(container: HTMLElement, handle: HTMLElement, direction: string) {
-		let isResizing = false;
-		let startX: number, startY: number, startWidth: number, startHeight: number, startLeft: number, startTop: number;
-	
-		handle.onmousedown = (e) => {
-			e.stopPropagation();
-			isResizing = true;
-			startX = e.clientX;
-			startY = e.clientY;
-			startWidth = container.offsetWidth;
-			startHeight = container.offsetHeight;
-			startLeft = container.offsetLeft;
-			startTop = container.offsetTop;
-
-			document.body.style.cursor = window.getComputedStyle(handle).cursor;
-	
-			const iframe = container.querySelector('#obsidian-clipper-iframe');
-			if (iframe) iframe.classList.add('is-resizing');
-	
-			document.onmousemove = (moveEvent) => {
-				if (!isResizing) return;
-
-				const dx = moveEvent.clientX - startX;
-				const dy = moveEvent.clientY - startY;
-
-				const minWidth = parseInt(container.style.minWidth) || 200;
-				const minHeight = parseInt(container.style.minHeight) || 200;
-
-				if (direction.includes('e')) {
-					let newWidth = startWidth + dx;
-					if (newWidth < minWidth) newWidth = minWidth;
-					container.style.width = `${newWidth}px`;
-				}
-				if (direction.includes('w')) {
-					let newWidth = startWidth - dx;
-					if (newWidth < minWidth) {
-						newWidth = minWidth;
-					}
-					container.style.width = `${newWidth}px`;
-				}
-				if (direction.includes('s')) {
-					let newHeight = startHeight + dy;
-					if (newHeight < minHeight) newHeight = minHeight;
-					container.style.height = `${newHeight}px`;
-				}
-				if (direction.includes('n')) {
-					let newHeight = startHeight - dy;
-					let newTop = startTop + dy;
-					if (newHeight < minHeight) {
-						newHeight = minHeight;
-						newTop = startTop + startHeight - minHeight;
-					}
-					container.style.height = `${newHeight}px`;
-					container.style.top = `${newTop}px`;
-				}
-
-				updateSidebarWidth(container);
-			};
-	
-			document.onmouseup = () => {
-				isResizing = false;
-				const iframe = container.querySelector('#obsidian-clipper-iframe');
-				if (iframe) iframe.classList.remove('is-resizing');
-				document.body.style.cursor = '';
-				
-				const newWidth = container.offsetWidth;
-				const newHeight = container.offsetHeight;
-				browser.storage.local.set({ clipperIframeWidth: newWidth, clipperIframeHeight: newHeight });
-
-				highlighter.repositionHighlights();
-
-				document.onmousemove = null;
-				document.onmouseup = null;
-			};
-		};
+		updateSidebarWidth(document, container);
+		container.addEventListener('animationend', () => highlighter.repositionHighlights(), { once: true });
 	}
 
 	// Firefox
@@ -220,23 +124,6 @@ declare global {
 		wordCount: number;
 		language: string;
 		metaTags: { name?: string | null; property?: string | null; content: string | null }[];
-	}
-
-	function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, fallback: T): Promise<T> {
-		let timeoutId: number | undefined;
-		const timeout = new Promise<T>(resolve => {
-			timeoutId = window.setTimeout(() => {
-				console.warn(`[Obsidian Clipper] ${label} timed out after ${timeoutMs}ms`);
-				resolve(fallback);
-			}, timeoutMs);
-		});
-		return Promise.race([promise, timeout]).finally(() => {
-			if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-		});
-	}
-
-	function isXStatusPage(url: string): boolean {
-		return /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(url);
 	}
 
 	browser.runtime.onMessage.addListener((request: any, sender, sendResponse) => {
@@ -348,7 +235,7 @@ declare global {
 					const clonedSelection = range.cloneContents();
 					const div = document.createElement('div');
 					div.appendChild(clonedSelection);
-					selectedHtml = div.innerHTML;
+					selectedHtml = serializeChildren(div);
 				}
 
 				let platformContent = await withTimeout(
@@ -359,6 +246,7 @@ declare global {
 				);
 				let defuddled: any = {
 					author: '',
+					content: '',
 					description: '',
 					favicon: '',
 					image: '',
@@ -373,6 +261,7 @@ declare global {
 					wordCount: 0,
 				};
 
+				// X extraction needs main-world API data and can be much faster than Defuddle.
 				if (platformContent?.site !== 'X') {
 					// Use parseAsync to ensure async variables like {{transcript}} are available.
 					// If it hangs (e.g. another extension has corrupted fetch), fall back to sync parse.
@@ -444,26 +333,30 @@ declare global {
 				// Get the modified HTML without scripts, styles, and style attributes
 				const cleanedHtml = doc.documentElement.outerHTML;
 
-			const response: ContentResponse = {
-				author: platformContent?.author || defuddled.author,
-				content: platformContent?.content || defuddled.content,
-				description: platformContent?.description || defuddled.description,
-				domain: getDomain(document.URL),
-				extractedContent: extractedContent,
-				favicon: defuddled.favicon,
-				fullHtml: cleanedHtml,
-				highlights: highlighter.getHighlights(),
-				image: platformContent?.image || defuddled.image,
-				language: defuddled.language || '',
-				parseTime: defuddled.parseTime,
-				published: platformContent?.published || defuddled.published,
-				schemaOrgData: defuddled.schemaOrgData,
-				selectedHtml: selectedHtml,
-				site: platformContent?.site || defuddled.site,
-				title: platformContent?.title || defuddled.title,
-				wordCount: platformContent?.wordCount || defuddled.wordCount,
-				metaTags: defuddled.metaTags || []
-			};
+				const response: ContentResponse = {
+					author: platformContent?.author || defuddled.author,
+					content: platformContent?.content || defuddled.content,
+					description: platformContent?.description || defuddled.description,
+					domain: getDomain(document.URL),
+					extractedContent: extractedContent,
+					favicon: defuddled.favicon,
+					fullHtml: cleanedHtml,
+					highlights: highlighter.getHighlights(),
+					image: platformContent?.image || defuddled.image,
+					language: defuddled.language || '',
+					parseTime: defuddled.parseTime,
+					published: platformContent?.published || defuddled.published,
+					schemaOrgData: defuddled.schemaOrgData,
+					selectedHtml: selectedHtml,
+					site: platformContent?.site || defuddled.site,
+					title: platformContent?.title || defuddled.title,
+					wordCount: platformContent?.wordCount || defuddled.wordCount,
+					metaTags: defuddled.metaTags || []
+				};
+				if (response.title) {
+					highlighter.setPageTitle(response.title);
+				}
+				highlighter.updatePageDomainSettings({ site: response.site, favicon: response.favicon });
 				sendResponse(response);
 			}).catch((error: unknown) => {
 				console.error('[Obsidian Clipper] getPageContent error:', error);
@@ -543,7 +436,6 @@ declare global {
 				}
 
 				if (elementToHighlight) {
-					const xpath = highlighter.getElementXPath(elementToHighlight);
 					highlighter.highlightElement(elementToHighlight);
 				} else {
 					console.warn('Could not find element to highlight. Info:', request.targetElementInfo);
@@ -608,11 +500,36 @@ declare global {
 		}
 
 		await highlighter.loadHighlights();
+		highlighter.setPageTitle(document.title);
 		updateHasHighlights();
 	}
 
 	// Initialize highlighter
 	initializeHighlighter();
+
+	// Expose highlighter API on window so reader-script.js (a separate
+	// webpack bundle injected when reader mode activates) can delegate
+	// all state operations to this single module instance. Without this,
+	// both bundles own a copy of highlighter.ts with independent mutable
+	// state — the bridge ensures one source of truth per tab.
+	window.__obsidianHighlighter = {
+		toggleHighlighterMenu: highlighter.toggleHighlighterMenu,
+		handleTextSelection: highlighter.handleTextSelection,
+		highlightElement: highlighter.highlightElement,
+		applyHighlights: highlighter.applyHighlights,
+		loadHighlights: highlighter.loadHighlights,
+		invalidateHighlightCache: highlighter.invalidateHighlightCache,
+		repositionHighlights: highlighter.repositionHighlights,
+		getHighlights: highlighter.getHighlights,
+		setPageUrl: highlighter.setPageUrl,
+		setPageTitle: highlighter.setPageTitle,
+		updatePageDomainSettings: highlighter.updatePageDomainSettings,
+		clearHighlights: highlighter.clearHighlights,
+		saveHighlights: highlighter.saveHighlights,
+		updateHighlighterMenu: highlighter.updateHighlighterMenu,
+		removeExistingHighlights,
+		ensureHighlighterCSS: () => { ensureHighlighterCSS(); },
+	} satisfies highlighter.HighlighterAPI;
 
 	// Call updateHasHighlights when the page loads
 	window.addEventListener('load', updateHasHighlights);

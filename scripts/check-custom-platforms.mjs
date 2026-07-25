@@ -9,18 +9,32 @@ const requiredHooks = [
 	{
 		file: path.join(srcDir, 'content.ts'),
 		importPath: './platforms',
+		calls: ['beforeDomNormalize', 'afterExtract', 'extractStructuredContent'],
 	},
 	{
 		file: path.join(srcDir, 'utils', 'content-extractor.ts'),
 		importPath: '../platforms',
+		calls: ['afterMarkdown'],
 	},
 	{
 		file: path.join(srcDir, 'utils', 'reader.ts'),
 		importPath: '../platforms',
+		calls: ['extractReaderContent', 'captureReaderState', 'enhanceReader', 'onReaderRestore'],
 	},
 	{
 		file: path.join(srcDir, 'background.ts'),
 		importPath: './platforms',
+		calls: ['registerPlatformBackgroundHandlers', 'handlePlatformBackgroundMessage'],
+	},
+	{
+		file: path.join(srcDir, 'utils', 'clip-utils.ts'),
+		importPath: '../platforms',
+		calls: ['beforeDomNormalize', 'afterExtract'],
+	},
+	{
+		file: path.join(srcDir, 'core', 'reader-view.ts'),
+		importPath: '../platforms',
+		calls: ['beforeDomNormalize', 'afterExtract', 'extractReaderContent', 'extractStructuredContent'],
 	},
 ];
 
@@ -48,6 +62,11 @@ for (const hook of requiredHooks) {
 	const source = readFileSync(hook.file, 'utf8');
 	if (!source.includes(hook.importPath)) {
 		failures.push(`${path.relative(root, hook.file)} is missing platform hook ${hook.importPath}.`);
+	}
+	for (const call of hook.calls) {
+		if (!source.includes(call)) {
+			failures.push(`${path.relative(root, hook.file)} is missing platform call ${call}.`);
+		}
 	}
 }
 

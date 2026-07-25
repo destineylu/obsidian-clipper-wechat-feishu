@@ -26,6 +26,9 @@
 	"advanced": {
 		"message": "Avansert"
 	},
+	"allHighlights": {
+		"message": "Alle uthevinger"
+	},
 	"allProperties": {
 		"message": "Alle egenskaper"
 	},
@@ -162,6 +165,15 @@
 	"delete": {
 		"message": "Slett"
 	},
+	"deleteAllHighlightsConfirm": {
+		"message": "Er du sikker på at du vil slette alle uthevinger?"
+	},
+	"deleteHighlightsForDomain": {
+		"message": "Slette alle uthevinger for dette domenet?"
+	},
+	"deleteHighlightsForPage": {
+		"message": "Slette alle uthevinger for denne siden?"
+	},
 	"deleteModelConfirm": {
 		"message": "Er du sikker på at du vil slette denne modellen?"
 	},
@@ -196,6 +208,9 @@
 	},
 	"earlyAccessFeatures": {
 		"message": "Tidlig tilgang-funksjoner"
+	},
+	"edit": {
+		"message": "Rediger"
 	},
 	"editModel": {
 		"message": "Rediger modell"
@@ -351,6 +366,9 @@
 	"highlightPage": {
 		"message": "Uthev side"
 	},
+	"highlightSelection": {
+		"message": "Uthev"
+	},
 	"highlighter": {
 		"message": "Uthever"
 	},
@@ -359,6 +377,20 @@
 	},
 	"highlighterSettings": {
 		"message": "Uthever"
+	},
+	"highlights": {
+		"message": "Uthevinger"
+	},
+	"highlightsImportSuccess": {
+		"message": "Importerte $1 markeringer.",
+		"placeholders": {
+			"1": {
+				"content": "$1"
+			}
+		}
+	},
+	"highlightsNotFound": {
+		"message": "Fant ingen uthevinger i artikkelen"
 	},
 	"history": {
 		"message": "Historikk"
@@ -377,6 +409,12 @@
 	},
 	"importFailed": {
 		"message": "Import mislyktes. Sjekk konsollen for detaljer."
+	},
+	"importHighlights": {
+		"message": "Importer markeringer"
+	},
+	"importHighlightsDescription": {
+		"message": "Importer markeringer fra en fil. Eksisterende markeringer beholdes."
 	},
 	"importModalTitle": {
 		"message": "Importer"
@@ -445,6 +483,12 @@
 	"legacyModeDescription": {
 		"message": "Bruker URI-fangstmetoden som er kompatibel med Obsidian 1.6.7 og eldre. Merk at lengden på fanget innhold er begrenset av nettleseren og operativsystemet. Noen sider kan mislykkes uten feilmelding."
 	},
+	"loadArticle": {
+		"message": "Les artikkel"
+	},
+	"loading": {
+		"message": "Laster…"
+	},
 	"modelName": {
 		"message": "Modellnavn"
 	},
@@ -477,6 +521,9 @@
 	},
 	"noHighlights": {
 		"message": "Ingen uthevinger"
+	},
+	"noResults": {
+		"message": "Ingen resultater funnet"
 	},
 	"noTemplates": {
 		"message": "Ingen tilgjengelige maler. Legg til en mal i innstillingene."
@@ -522,6 +569,12 @@
 	},
 	"openEmbedded": {
 		"message": "Åpne i side"
+	},
+	"openHighlights": {
+		"message": "Åpne uthevinger"
+	},
+	"openReader": {
+		"message": "Åpne leser"
 	},
 	"openSidePanel": {
 		"message": "Åpne sidepanel"
@@ -739,6 +792,9 @@
 	"readerFontSystemSerif": {
 		"message": "Serif"
 	},
+	"readerFontUnavailable": {
+		"message": "Denne skriften er ikke tilgjengelig her — nettleseren din blokkerer kanskje egendefinerte skrifter."
+	},
 	"readerFonts": {
 		"message": "Skrifter"
 	},
@@ -759,6 +815,9 @@
 	},
 	"readerLineWidth": {
 		"message": "Linjebredde"
+	},
+	"readerLoadFailed": {
+		"message": "Kunne ikke laste inn. Siden kan være blokkert av nettleseren din."
 	},
 	"readerLoading": {
 		"message": "Fjerner støy…"
@@ -789,6 +848,9 @@
 	},
 	"readerTypography": {
 		"message": "Typografi"
+	},
+	"readerUrlPlaceholder": {
+		"message": "Lim inn en URL for å lese…"
 	},
 	"readerViewFullSize": {
 		"message": "Vis i full størrelse"
@@ -843,6 +905,9 @@
 	},
 	"saveFile": {
 		"message": "Lagre fil..."
+	},
+	"searchHighlightsPlaceholder": {
+		"message": "Søk i uthevinger…"
 	},
 	"searchVariables": {
 		"message": "Søk i variabler..."
@@ -903,6 +968,21 @@
 	},
 	"silentOpenDescription": {
 		"message": "Klippede notater vil bli lagret men ikke åpnet i en ny fane. Obsidian vil fortsatt bli brakt til forgrunnen."
+	},
+	"sort": {
+		"message": "Sorter"
+	},
+	"sortAZ": {
+		"message": "A til Å"
+	},
+	"sortNewOld": {
+		"message": "Nyeste først"
+	},
+	"sortOldNew": {
+		"message": "Eldste først"
+	},
+	"sortZA": {
+		"message": "Å til A"
 	},
 	"specificNoteName": {
 		"message": "Spesifikt notatnavn"

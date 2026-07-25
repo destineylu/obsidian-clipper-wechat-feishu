@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
 	define: {
@@ -8,7 +9,7 @@ export default defineConfig({
 		include: ['src/**/*.test.ts'],
 		globals: true,
 		alias: {
-			'webextension-polyfill': new URL('./src/utils/__mocks__/webextension-polyfill.ts', import.meta.url).pathname,
+			'webextension-polyfill': fileURLToPath(new URL('./src/utils/__mocks__/webextension-polyfill.ts', import.meta.url)),
 		},
 	},
 });

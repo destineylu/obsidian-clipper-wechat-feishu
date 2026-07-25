@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-clipper",
-	"version": "1.6.1",
+	"version": "1.7.1",
 	"description": "Official web clipper for Obsidian.",
 	"bin": {
 		"obsidian-clipper": "./dist/cli.cjs"
@@ -46,7 +46,8 @@
 		"copy-webpack-plugin": "^14.0.0",
 		"css-loader": "^7.1.2",
 		"dotenv": "^16.4.1",
-		"esbuild": "^0.25.0",
+		"esbuild": "^0.28.1",
+		"jsdom": "^29.1.1",
 		"mini-css-extract-plugin": "^2.9.1",
 		"sass": "^1.77.8",
 		"sass-loader": "^16.0.1",
@@ -62,8 +63,8 @@
 	"dependencies": {
 		"@types/safari-extension": "^0.0.33",
 		"dayjs": "^1.11.13",
-		"defuddle": "^0.16.0",
-		"dompurify": "^3.0.9",
+		"defuddle": "^0.19.2",
+		"dompurify": "^3.4.12",
 		"highlight.js": "^11.11.1",
 		"linkedom": "^0.18.0",
 		"lucide": "^0.359.0",

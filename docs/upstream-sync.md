@@ -26,6 +26,8 @@ Keep custom site behavior in `src/platforms/*`:
 Official-like core files should only call these platform hooks:
 
 - `src/content.ts`
+- `src/core/reader-view.ts`
+- `src/utils/clip-utils.ts`
 - `src/utils/content-extractor.ts`
 - `src/utils/reader.ts`
 
@@ -105,7 +107,7 @@ This fork intentionally keeps `package.json` and all browser manifest versions a
 Manual override for emergency releases:
 
 ```bash
-OFFICIAL_CLIPPER_VERSION=1.6.1 npm run sync:official-version
+OFFICIAL_CLIPPER_VERSION=1.7.1 npm run sync:official-version
 ```
 
 To intentionally follow the official GitHub `main` branch instead of the released browser extension:

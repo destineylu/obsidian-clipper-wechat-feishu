@@ -1,3 +1,8 @@
+// @vitest-environment jsdom
+// createMarkdownContent() runs turndown, which needs a DOM (document/DOMParser) to
+// parse the HTML it converts — same as the extension and CLI provide at runtime.
+// Without it, {{content}} fixtures (minimal, edge-cases) get turndown's error
+// fallback instead of real markdown. jsdom supplies those globals for this file.
 import { describe, test, expect, vi, beforeAll, afterAll } from 'vitest';
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, basename, extname } from 'path';
@@ -115,6 +120,16 @@ function saveExpected(name: string, content: string): void {
 	writeFileSync(join(EXPECTED_DIR, `${name}.md`), content, 'utf-8');
 }
 
+function normalizeFixtureOutput(content: string): string {
+	return content
+		.replace(/\r\n/g, '\n')
+		.replace(/^created: "([^"]+)"$/m, (_match, value: string) => {
+			const date = new Date(value);
+			return Number.isNaN(date.getTime()) ? `created: "${value}"` : `created: "${date.toISOString()}"`;
+		})
+		.trim();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -150,6 +165,6 @@ describe('Template fixtures', () => {
 			);
 		}
 
-		expect(result.trim()).toEqual(expected.trim());
+		expect(normalizeFixtureOutput(result)).toEqual(normalizeFixtureOutput(expected));
 	});
 });
