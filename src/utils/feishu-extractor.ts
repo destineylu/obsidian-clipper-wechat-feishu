@@ -113,6 +113,7 @@ interface FeishuDomVideo {
 
 interface FeishuDomMedia {
 	images: string[];
+	imageUrlsByToken: Map<string, string>;
 	videos: FeishuDomVideo[];
 	embeds: string[];
 }
@@ -126,8 +127,29 @@ interface FeishuRenderContext {
 
 const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
+export const MAX_TOTAL_INLINE_MEDIA_BYTES = 128 * 1024 * 1024;
 const FEISHU_MEDIA_FETCH_TIMEOUT_MS = 8_000;
+const FEISHU_MEDIA_CALLER_GRACE_MS = 1_000;
 const DEFAULT_FEISHU_MEDIA_INLINE_CONCURRENCY = 4;
+
+interface FeishuFetchedMedia {
+	dataUrl: string;
+	size: number;
+}
+
+function redactFeishuIdentifier(value: string | null | undefined): string {
+	return value ? `[redacted:${value.length}]` : '[none]';
+}
+
+function redactFeishuUrl(value: string): string {
+	try {
+		const parsed = new URL(value);
+		const type = parsed.pathname.match(/^\/(wiki|docx|docs?)(?:\/|$)/)?.[1] || 'api';
+		return `https://<feishu-host>/${type}/<redacted>`;
+	} catch {
+		return '[invalid-url]';
+	}
+}
 
 const FEISHU_BLOCK_TYPE = {
 	PAGE: 1,
@@ -175,6 +197,19 @@ export function isFeishuDocUrl(url: string): boolean {
 	}
 }
 
+export function isAllowedFeishuDirectMediaUrl(url: string): boolean {
+	try {
+		const parsedUrl = new URL(url);
+		if (parsedUrl.protocol !== 'https:') return false;
+		if (parsedUrl.hostname === 'internal-api-drive-stream.feishu.cn') {
+			return parsedUrl.pathname.startsWith('/space/api/box/stream/download/');
+		}
+		return /^s\d+-imfile\.feishucdn\.com$/i.test(parsedUrl.hostname);
+	} catch {
+		return false;
+	}
+}
+
 export function parseFeishuUrl(url: string): FeishuParsedUrl {
 	try {
 		const parsed = new URL(url);
@@ -200,18 +235,32 @@ async function fetchFeishuApi(url: string, options?: { method?: string; body?: s
 
 	if (!response?.success) {
 		const errMsg = response?.error || 'Failed to fetch Feishu API';
-		console.warn('[Feishu Clipper] API request failed:', errMsg, 'URL:', url);
+		debugLog('Feishu', 'API request failed', {
+			error: errMsg,
+			url: redactFeishuUrl(url),
+		});
 		throw new Error(errMsg);
 	}
 	return response.data;
 }
 
-async function fetchFeishuMediaAsDataUrl(url: string, maxBytes = MAX_INLINE_IMAGE_BYTES): Promise<string> {
+export async function fetchFeishuMediaAsDataUrl(
+	url: string,
+	maxBytes = MAX_INLINE_IMAGE_BYTES,
+	timeoutMs = FEISHU_MEDIA_FETCH_TIMEOUT_MS
+): Promise<FeishuFetchedMedia> {
+	const requestId = crypto.randomUUID();
 	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	let callerTimedOut = false;
 	const timeoutPromise = new Promise<never>((_, reject) => {
 		timeoutId = setTimeout(() => {
-			reject(new Error(`Feishu media fetch timed out after ${FEISHU_MEDIA_FETCH_TIMEOUT_MS}ms`));
-		}, FEISHU_MEDIA_FETCH_TIMEOUT_MS);
+			callerTimedOut = true;
+			void browser.runtime.sendMessage({
+				action: 'cancelFeishuMedia',
+				requestId,
+			}).catch(() => {});
+			reject(new Error(`Feishu media fetch timed out after ${timeoutMs}ms`));
+		}, timeoutMs + FEISHU_MEDIA_CALLER_GRACE_MS);
 	});
 
 	const response = await Promise.race([
@@ -219,17 +268,30 @@ async function fetchFeishuMediaAsDataUrl(url: string, maxBytes = MAX_INLINE_IMAG
 			action: 'fetchFeishuMedia',
 			url,
 			maxBytes,
-		}) as Promise<{ success?: boolean; data?: { dataUrl?: string }; error?: string }>,
+			requestId,
+			timeoutMs,
+		}) as Promise<{ success?: boolean; data?: { dataUrl?: string; size?: number }; error?: string }>,
 		timeoutPromise,
 	]).finally(() => {
 		if (timeoutId) clearTimeout(timeoutId);
+		if (callerTimedOut) {
+			void browser.runtime.sendMessage({
+				action: 'cancelFeishuMedia',
+				requestId,
+			}).catch(() => {});
+		}
 	});
 
 	if (!response?.success || !response.data?.dataUrl) {
 		throw new Error(response?.error || 'Failed to fetch Feishu media');
 	}
 
-	return response.data.dataUrl;
+	return {
+		dataUrl: response.data.dataUrl,
+		size: typeof response.data.size === 'number'
+			? response.data.size
+			: Math.ceil(response.data.dataUrl.length * 3 / 4),
+	};
 }
 
 async function resolveDocumentId(parsedUrl: FeishuParsedUrl): Promise<{ documentId: string; objType: string } | null> {
@@ -241,7 +303,10 @@ async function resolveDocumentId(parsedUrl: FeishuParsedUrl): Promise<{ document
 		);
 		const node = result?.data?.node;
 		if (!node?.obj_token) {
-			console.warn('[Feishu Clipper] Wiki get_node returned no obj_token. Response:', JSON.stringify(result).slice(0, 500));
+			debugLog('Feishu', 'Wiki get_node returned no obj_token', {
+				code: result?.code,
+				hasData: !!result?.data,
+			});
 			return null;
 		}
 		return { documentId: node.obj_token, objType: node.obj_type || 'docx' };
@@ -381,8 +446,11 @@ function countMatches(value: string, pattern: RegExp): number {
 	return value.match(pattern)?.length || 0;
 }
 
-function buildFeishuImagePlaceholder(token: string): string {
-	return `feishu-image://${token}`;
+function buildFeishuImagePlaceholder(token: string, fallbackUrl?: string): string {
+	const placeholder = `feishu-image://${token}`;
+	return fallbackUrl && isAllowedFeishuDirectMediaUrl(fallbackUrl)
+		? `${placeholder}?fallback=${encodeURIComponent(fallbackUrl)}`
+		: placeholder;
 }
 
 function buildFeishuFilePlaceholder(token: string): string {
@@ -399,14 +467,18 @@ function describeMediaOrigin(src: string): 'data' | 'blob' | 'http' | 'unknown' 
 function buildFeishuMediaDownloadUrls(openApiHost: string, token: string, parentTypes: string[], mediaKind: 'image' | 'file'): string[] {
 	const encodedToken = encodeURIComponent(token);
 	const mediaUrls = [
-		...parentTypes.map(parentType => `${openApiHost}/open-apis/drive/v1/medias/${encodedToken}/download?parent_type=${encodeURIComponent(parentType)}`),
+		// Current Open Platform documentation uses the singular `media` route.
 		`${openApiHost}/open-apis/drive/v1/media/${encodedToken}/download`,
+		// Keep the legacy plural route for older Feishu deployments.
+		...parentTypes.map(parentType => `${openApiHost}/open-apis/drive/v1/medias/${encodedToken}/download?parent_type=${encodeURIComponent(parentType)}`),
 	];
 
 	if (mediaKind === 'file') {
 		return [
-			`${openApiHost}/open-apis/drive/v1/files/${encodedToken}/download`,
 			...mediaUrls,
+			// A document file block normally exposes a media token. This final
+			// fallback only covers older blocks that expose a Drive file token.
+			`${openApiHost}/open-apis/drive/v1/files/${encodedToken}/download`,
 		];
 	}
 
@@ -420,16 +492,29 @@ export function buildFeishuMediaDownloadLinks(pageUrl: string, token: string, me
 	return buildFeishuMediaDownloadUrls(openApiHost, token, getMediaParentTypes(objType, mediaKind), mediaKind);
 }
 
-async function tryFetchFeishuMediaDataUrl(urls: string[], maxBytes: number, context?: { kind: 'image' | 'file'; token?: string; name?: string }): Promise<string | null> {
+async function tryFetchFeishuMediaDataUrl(
+	urls: string[],
+	maxBytes: number,
+	deadline: number | null,
+	context?: { kind: 'image' | 'file'; token?: string; name?: string }
+): Promise<FeishuFetchedMedia | null> {
 	for (const url of urls) {
+		const remainingMs = deadline === null
+			? FEISHU_MEDIA_FETCH_TIMEOUT_MS
+			: Math.max(0, deadline - Date.now());
+		if (remainingMs <= 0) return null;
 		try {
-			return await fetchFeishuMediaAsDataUrl(url, maxBytes);
+			return await fetchFeishuMediaAsDataUrl(
+				url,
+				maxBytes,
+				Math.min(FEISHU_MEDIA_FETCH_TIMEOUT_MS, remainingMs)
+			);
 		} catch (error) {
 			debugLog('Feishu', 'Media fetch candidate failed', {
 				error: error instanceof Error ? error.message : String(error),
-				url,
+				url: redactFeishuUrl(url),
 				kind: context?.kind,
-				token: context?.token,
+				token: redactFeishuIdentifier(context?.token),
 				name: context?.name,
 				maxBytes,
 			});
@@ -474,11 +559,59 @@ function shouldKeepDomImage(img: HTMLImageElement): boolean {
 	return true;
 }
 
+export function collectFeishuDirectMediaUrlsByToken(
+	resourceUrls: Iterable<string>
+): Map<string, string> {
+	const urlsByToken = new Map<string, string>();
+	for (const resourceUrl of resourceUrls) {
+		if (!isAllowedFeishuDirectMediaUrl(resourceUrl)) continue;
+		try {
+			const parsedUrl = new URL(resourceUrl);
+			const pathSegments = parsedUrl.pathname.split('/').filter(Boolean);
+			const encodedToken = pathSegments[pathSegments.length - 1];
+			if (!encodedToken) continue;
+			const token = decodeURIComponent(encodedToken);
+			if (!token || /[\u0000-\u001f]/.test(token)) continue;
+			urlsByToken.set(token, resourceUrl);
+		} catch {
+			// Ignore malformed or unsupported resource entries.
+		}
+	}
+	return urlsByToken;
+}
+
+function getFeishuPerformanceResourceUrls(doc: Document): string[] {
+	try {
+		const performanceApi = doc.defaultView?.performance;
+		if (!performanceApi?.getEntriesByType) return [];
+		return performanceApi
+			.getEntriesByType('resource')
+			.map(entry => entry.name)
+			.filter((name): name is string => typeof name === 'string');
+	} catch {
+		return [];
+	}
+}
+
 function collectFeishuDomMedia(doc: Document): FeishuDomMedia {
 	const images = Array.from(doc.querySelectorAll('img'))
 		.filter(shouldKeepDomImage)
 		.map(img => img.currentSrc || img.src)
 		.filter(isSafeMediaUrl);
+	const imageUrlsByToken = collectFeishuDirectMediaUrlsByToken(
+		getFeishuPerformanceResourceUrls(doc)
+	);
+
+	for (const tokenElement of Array.from(doc.querySelectorAll('[image-token]'))) {
+		const token = tokenElement.getAttribute('image-token');
+		if (!token || imageUrlsByToken.has(token)) continue;
+		const imageBlock = tokenElement.closest('.docx-image-block') || tokenElement;
+		const image = imageBlock.querySelector('img');
+		const imageUrl = image?.currentSrc || image?.src || '';
+		if (isAllowedFeishuDirectMediaUrl(imageUrl)) {
+			imageUrlsByToken.set(token, imageUrl);
+		}
+	}
 
 	const videos: FeishuDomVideo[] = Array.from(doc.querySelectorAll('video'))
 		.flatMap(video => {
@@ -494,6 +627,7 @@ function collectFeishuDomMedia(doc: Document): FeishuDomMedia {
 
 	return {
 		images: dedupePreserveOrder(images),
+		imageUrlsByToken,
 		videos: dedupePreserveOrder(videos, video => `${video.src}::${video.poster || ''}`),
 		embeds: dedupePreserveOrder(embeds),
 	};
@@ -531,10 +665,12 @@ function buildVideoHtml(src: string, options: { title?: string; poster?: string 
 function resolveImageSource(block: FeishuBlock, context: FeishuRenderContext): string | null {
 	const token = block.image?.token;
 	if (token) {
-		const placeholder = buildFeishuImagePlaceholder(token);
-		console.log('[Feishu Clipper] Resolved image block to placeholder:', {
+		const fallbackUrl = context.domMedia.imageUrlsByToken.get(token);
+		const placeholder = buildFeishuImagePlaceholder(token, fallbackUrl);
+		debugLog('Feishu', 'Resolved image block to placeholder', {
 			blockType: block.block_type,
-			token,
+			token: redactFeishuIdentifier(token),
+			hasPageFallback: !!fallbackUrl,
 			title: block.image?.title,
 			width: block.image?.width,
 			height: block.image?.height,
@@ -545,9 +681,9 @@ function resolveImageSource(block: FeishuBlock, context: FeishuRenderContext): s
 	const domCandidate = context.domMedia.images.shift() || null;
 	if (!domCandidate) return null;
 
-	console.log('[Feishu Clipper] Resolved image block from DOM URL:', {
+	debugLog('Feishu', 'Resolved image block from DOM URL', {
 		blockType: block.block_type,
-		token,
+		token: redactFeishuIdentifier(token),
 		origin: describeMediaOrigin(domCandidate),
 	});
 	return domCandidate;
@@ -557,8 +693,8 @@ function resolveVideoSource(file: FeishuFileBlock | undefined, context: FeishuRe
 	const token = file?.token;
 	if (token) {
 		const placeholder = buildFeishuFilePlaceholder(token);
-		console.log('[Feishu Clipper] Resolved video/file block to placeholder:', {
-			token,
+		debugLog('Feishu', 'Resolved video/file block to placeholder', {
+			token: redactFeishuIdentifier(token),
 			name: file?.name,
 			mimeType: file?.mime_type,
 		});
@@ -567,8 +703,8 @@ function resolveVideoSource(file: FeishuFileBlock | undefined, context: FeishuRe
 
 	const domCandidate = context.domMedia.videos.shift() || null;
 	if (domCandidate) {
-		console.log('[Feishu Clipper] Resolved video from DOM URL:', {
-			token: file?.token,
+		debugLog('Feishu', 'Resolved video from DOM URL', {
+			token: redactFeishuIdentifier(file?.token),
 			name: file?.name,
 			origin: describeMediaOrigin(domCandidate.src),
 			hasPoster: !!domCandidate.poster,
@@ -699,9 +835,9 @@ async function renderFileBlock(block: FeishuBlock, context: FeishuRenderContext)
 	if (isLikelyVideoFile(file?.name, file?.mime_type)) {
 		const video = await resolveVideoSource(file, context);
 		if (video?.src) {
-			console.log('[Feishu Clipper] Rendered file block as video:', {
+			debugLog('Feishu', 'Rendered file block as video', {
 				blockType: block.block_type,
-				token: file?.token,
+				token: redactFeishuIdentifier(file?.token),
 				name: fileName,
 				origin: describeMediaOrigin(video.src),
 			});
@@ -711,9 +847,9 @@ async function renderFileBlock(block: FeishuBlock, context: FeishuRenderContext)
 
 	if (isLikelyImageFile(file?.name, file?.mime_type) && file?.token) {
 		const src = buildFeishuFilePlaceholder(file.token);
-		console.log('[Feishu Clipper] Rendered file block as image placeholder:', {
+		debugLog('Feishu', 'Rendered file block as image placeholder', {
 			blockType: block.block_type,
-			token: file.token,
+			token: redactFeishuIdentifier(file.token),
 			name: fileName,
 		});
 		return buildImageHtml(src, { alt: fileName });
@@ -721,19 +857,19 @@ async function renderFileBlock(block: FeishuBlock, context: FeishuRenderContext)
 
 	if (file?.token) {
 		const placeholder = buildFeishuFilePlaceholder(file.token);
-		console.log('[Feishu Clipper] Rendered file block as placeholder link:', {
+		debugLog('Feishu', 'Rendered file block as placeholder link', {
 			blockType: block.block_type,
-			token: file.token,
+			token: redactFeishuIdentifier(file.token),
 			name: fileName,
-			placeholder,
+			placeholder: 'feishu-file://<redacted>',
 		});
 		return `<p><a href="${escapeAttr(placeholder)}">${escapeHtml(fileName)}</a></p>`;
 	}
 
-	console.log('[Feishu Clipper] Rendered file block as document fallback:', {
+	debugLog('Feishu', 'Rendered file block as document fallback', {
 		blockType: block.block_type,
 		name: fileName,
-		documentUrl: context.documentUrl,
+		documentUrl: redactFeishuUrl(context.documentUrl),
 	});
 	return `<p><a href="${escapeAttr(context.documentUrl)}">${escapeHtml(fileName)}</a></p>`;
 }
@@ -874,7 +1010,13 @@ async function renderTable(block: FeishuBlock, blockMap: Map<string, FeishuBlock
 export async function inlineFeishuMediaPlaceholders(
 	content: string,
 	pageUrl: string,
-	options: { maxImages?: number; maxFiles?: number; maxDurationMs?: number; concurrency?: number } = {}
+	options: {
+		maxImages?: number;
+		maxFiles?: number;
+		maxDurationMs?: number;
+		maxTotalBytes?: number;
+		concurrency?: number;
+	} = {}
 ): Promise<string> {
 	if (!content.includes('feishu-image://') && !content.includes('feishu-file://')) return content;
 
@@ -897,61 +1039,70 @@ export async function inlineFeishuMediaPlaceholders(
 	let nextContent = content;
 	let replacedImageCount = 0;
 	let replacedFileCount = 0;
+	let totalInlinedBytes = 0;
 	const startedAt = Date.now();
 	const concurrency = Math.max(1, options.concurrency || DEFAULT_FEISHU_MEDIA_INLINE_CONCURRENCY);
+	const maxTotalBytes = typeof options.maxTotalBytes === 'number'
+		? Math.max(0, options.maxTotalBytes)
+		: MAX_TOTAL_INLINE_MEDIA_BYTES;
+	const deadline = typeof options.maxDurationMs === 'number'
+		? startedAt + Math.max(0, options.maxDurationMs)
+		: null;
 
-	const hasTimeBudget = () => typeof options.maxDurationMs !== 'number' || Date.now() - startedAt < options.maxDurationMs;
+	const hasTimeBudget = () => deadline === null || Date.now() < deadline;
+	const hasByteBudget = () => totalInlinedBytes < maxTotalBytes;
 	const fetchTokenDataUrls = async (
 		tokens: string[],
 		kind: 'image' | 'file',
 		maxBytes: number
-	): Promise<Map<string, string>> => {
-		const dataUrls = new Map<string, string>();
+	): Promise<void> => {
 		let nextIndex = 0;
 		const parentTypes = getMediaParentTypes(objType, kind);
 
 		const workerCount = Math.min(concurrency, tokens.length);
 		await Promise.all(Array.from({ length: workerCount }, async () => {
-			while (hasTimeBudget()) {
+			while (hasTimeBudget() && hasByteBudget()) {
 				const token = tokens[nextIndex++];
 				if (!token) return;
 
-				const dataUrl = await tryFetchFeishuMediaDataUrl(
+				const remainingBytes = Math.max(0, maxTotalBytes - totalInlinedBytes);
+				if (!remainingBytes) return;
+				const media = await tryFetchFeishuMediaDataUrl(
 					buildFeishuMediaDownloadUrls(openApiHost, token, parentTypes, kind),
-					maxBytes,
+					Math.min(maxBytes, remainingBytes),
+					deadline,
 					{ kind, token }
 				);
-				if (dataUrl) {
-					dataUrls.set(token, dataUrl);
-				}
+				if (!media || totalInlinedBytes + media.size > maxTotalBytes) continue;
+
+				const placeholder = kind === 'image'
+					? new RegExp(
+						`feishu-image:\\/\\/${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\?fallback=[^"'\\s<>]+)?`,
+						'g'
+					)
+					: buildFeishuFilePlaceholder(token);
+				const hasPlaceholder = typeof placeholder === 'string'
+					? nextContent.includes(placeholder)
+					: placeholder.test(nextContent);
+				if (!hasPlaceholder) continue;
+				totalInlinedBytes += media.size;
+				nextContent = typeof placeholder === 'string'
+					? nextContent.split(placeholder).join(media.dataUrl)
+					: nextContent.replace(placeholder, media.dataUrl);
+				if (kind === 'image') replacedImageCount++;
+				else replacedFileCount++;
 			}
 		}));
-
-		return dataUrls;
 	};
 
-	const imageDataUrls = await fetchTokenDataUrls(imageTokensToInline, 'image', MAX_INLINE_IMAGE_BYTES);
-	for (const [token, dataUrl] of imageDataUrls) {
-		const placeholder = buildFeishuImagePlaceholder(token);
-		if (nextContent.includes(placeholder)) {
-			nextContent = nextContent.split(placeholder).join(dataUrl);
-			replacedImageCount++;
-		}
+	await fetchTokenDataUrls(imageTokensToInline, 'image', MAX_INLINE_IMAGE_BYTES);
+
+	if (fileTokensToInline.length > 0 && hasTimeBudget() && hasByteBudget()) {
+		await fetchTokenDataUrls(fileTokensToInline, 'file', MAX_INLINE_FILE_BYTES);
 	}
 
-	if (fileTokensToInline.length > 0 && hasTimeBudget()) {
-		const fileDataUrls = await fetchTokenDataUrls(fileTokensToInline, 'file', MAX_INLINE_FILE_BYTES);
-		for (const [token, dataUrl] of fileDataUrls) {
-			const placeholder = buildFeishuFilePlaceholder(token);
-			if (nextContent.includes(placeholder)) {
-				nextContent = nextContent.split(placeholder).join(dataUrl);
-				replacedFileCount++;
-			}
-		}
-	}
-
-	console.log('[Feishu Clipper] Inlined Feishu media placeholders:', {
-		url: pageUrl,
+	debugLog('Feishu', 'Inlined Feishu media placeholders', {
+		url: redactFeishuUrl(pageUrl),
 		imagePlaceholderCount: imageTokens.length,
 		filePlaceholderCount: fileTokens.length,
 		attemptedImageInlineCount: imageTokensToInline.length,
@@ -962,6 +1113,8 @@ export async function inlineFeishuMediaPlaceholders(
 		remainingFileCount: countMatches(nextContent, /feishu-file:\/\//gi),
 		durationMs: Date.now() - startedAt,
 		maxDurationMs: options.maxDurationMs,
+		maxTotalBytes,
+		totalInlinedBytes,
 		concurrency,
 	});
 
@@ -973,13 +1126,18 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 
 	const parsedUrl = parseFeishuUrl(doc.URL);
 	if (!parsedUrl.token || !parsedUrl.type) {
-		console.warn('[Feishu Clipper] Failed to parse URL:', doc.URL);
+		debugLog('Feishu', 'Failed to parse document URL', {
+			url: redactFeishuUrl(doc.URL),
+		});
 		return null;
 	}
 
 	const resolved = await resolveDocumentId(parsedUrl);
 	if (!resolved) {
-		console.warn('[Feishu Clipper] Failed to resolve document ID for token:', parsedUrl.token, 'type:', parsedUrl.type);
+		debugLog('Feishu', 'Failed to resolve document ID', {
+			token: redactFeishuIdentifier(parsedUrl.token),
+			type: parsedUrl.type,
+		});
 		return null;
 	}
 
@@ -989,7 +1147,9 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 	]);
 
 	if (!blocks.length) {
-		console.warn('[Feishu Clipper] No blocks returned for document:', resolved.documentId);
+		debugLog('Feishu', 'No blocks returned for document', {
+			documentId: redactFeishuIdentifier(resolved.documentId),
+		});
 		return null;
 	}
 
@@ -1000,9 +1160,9 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 		domMedia: collectFeishuDomMedia(doc),
 	};
 
-	console.log('[Feishu Clipper] Document structure summary:', {
-		url: doc.URL,
-		documentId: resolved.documentId,
+	debugLog('Feishu', 'Document structure summary', {
+		url: redactFeishuUrl(doc.URL),
+		documentId: redactFeishuIdentifier(resolved.documentId),
 		objType: resolved.objType,
 		blockTypes: summarizeBlockTypes(blocks),
 		domImages: context.domMedia.images.length,
@@ -1011,8 +1171,8 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 	});
 
 	const content = processUrls(await convertBlocksToHtml(blocks, context), new URL(doc.URL));
-	console.log('[Feishu Clipper] Final structured HTML summary:', {
-		url: doc.URL,
+	debugLog('Feishu', 'Final structured HTML summary', {
+		url: redactFeishuUrl(doc.URL),
 		imgCount: countMatches(content, /<img\b/gi),
 		videoCount: countMatches(content, /<video\b/gi),
 		iframeCount: countMatches(content, /<iframe\b/gi),

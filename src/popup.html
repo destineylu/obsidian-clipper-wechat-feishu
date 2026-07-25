@@ -65,6 +65,14 @@
 					<div id="token-counter" class="token-counter"></div>
 					<div id="interpreter-error" style="display: none;"></div>
 				</div>
+				<div id="feishu-bridge-progress" class="bridge-progress" hidden aria-live="polite">
+					<div class="bridge-progress-header">
+						<span id="feishu-bridge-progress-label"></span>
+						<span id="feishu-bridge-progress-count"></span>
+					</div>
+					<progress id="feishu-bridge-progress-bar" max="1" value="0"></progress>
+					<div id="feishu-bridge-progress-detail"></div>
+				</div>
 				<div class="action-buttons" id="action-buttons">
 					<button id="clip-btn" class="mod-cta"><!-- Text set by determineMainAction --></button>
 					<div class="menu-btn">

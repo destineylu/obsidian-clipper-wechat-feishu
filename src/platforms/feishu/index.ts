@@ -1,7 +1,9 @@
+import { debugLog } from '../../utils/debug';
 import { PlatformModule } from '../types';
 import { registerFeishuBackgroundHandlers } from './background';
 import { extractFeishuStructuredContent, isFeishuDocUrl } from './extractor';
 import { processFeishuMarkdown } from './markdown';
+import { saveFeishuToObsidian } from './save';
 
 export const feishuPlatform: PlatformModule = {
 	id: 'feishu',
@@ -9,7 +11,9 @@ export const feishuPlatform: PlatformModule = {
 	registerBackgroundHandlers: registerFeishuBackgroundHandlers,
 	async extractStructuredContent({ document }) {
 		const content = await extractFeishuStructuredContent(document).catch((error) => {
-			console.warn('Failed to extract Feishu structured content:', error);
+			debugLog('Feishu', 'Failed to extract structured content', {
+				error: error instanceof Error ? error.message : String(error),
+			});
 			return null;
 		});
 		if (!content) return null;
@@ -23,5 +27,8 @@ export const feishuPlatform: PlatformModule = {
 	},
 	afterMarkdown({ content, currentUrl }) {
 		return processFeishuMarkdown(content, currentUrl);
+	},
+	saveToObsidian(context) {
+		return saveFeishuToObsidian(context);
 	},
 };

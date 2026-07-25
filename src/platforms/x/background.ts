@@ -22,9 +22,9 @@ function isXStatusUrl(url: string): boolean {
 	return X_STATUS_PATTERN.test(url);
 }
 
-async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<XVideoCandidate | null> {
+async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<{ candidate: XVideoCandidate | null; candidates: XVideoCandidate[] }> {
 	const tweetId = pageUrl.match(/^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/i)?.[1] || '';
-	if (!tweetId) return null;
+	if (!tweetId) return { candidate: null, candidates: [] };
 
 	const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object';
 	const videoUrlPattern = /^https:\/\/video\.twimg\.com\/.+\.(?:mp4|m3u8)(?:[?#].*)?$/i;
@@ -37,7 +37,7 @@ async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<XVide
 			return url;
 		}
 	};
-	const chooseBest = (candidates: XVideoCandidate[]): XVideoCandidate | null => {
+	const sortCandidates = (candidates: XVideoCandidate[]): XVideoCandidate[] => {
 		const byUrl = new Map<string, XVideoCandidate>();
 		for (const candidate of candidates) {
 			if (!candidate.url) continue;
@@ -51,7 +51,7 @@ async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<XVide
 			const rightIsMp4 = right.contentType === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(right.url);
 			if (leftIsMp4 !== rightIsMp4) return leftIsMp4 ? -1 : 1;
 			return (right.bitrate || 0) - (left.bitrate || 0);
-		})[0] || null;
+		});
 	};
 	const collectMediaObjects = (root: unknown): Record<string, unknown>[] => {
 		const found: Record<string, unknown>[] = [];
@@ -255,11 +255,13 @@ async function extractXVideoCandidateInMainWorld(pageUrl: string): Promise<XVide
 			};
 		}));
 
-	if (!candidates.length) {
-		candidates.push(...await extractFromGraphql());
-	}
+	candidates.push(...await extractFromGraphql());
 
-	return chooseBest(candidates);
+	const sortedCandidates = sortCandidates(candidates);
+	return {
+		candidate: sortedCandidates[0] || null,
+		candidates: sortedCandidates,
+	};
 }
 
 export function registerXBackgroundHandlers(): PlatformBackgroundHandler[] {
@@ -276,152 +278,7 @@ export function registerXBackgroundHandlers(): PlatformBackgroundHandler[] {
 			chrome.scripting.executeScript({
 				target: { tabId },
 				world: 'MAIN',
-				func: async (targetUrl: string) => {
-					const tweetId = targetUrl.match(/^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/i)?.[1] || '';
-					if (!tweetId) return null;
-					let webpackRequire: { m?: Record<string, unknown> } | undefined;
-					(window as typeof window & { webpackChunk_twitter_responsive_web?: unknown[] })
-						.webpackChunk_twitter_responsive_web
-						?.push([[Math.random()], {}, (require: { m?: Record<string, unknown> }) => {
-							webpackRequire = require;
-						}]);
-					const moduleSources = Object.values(webpackRequire?.m || {}).map(moduleFactory => String(moduleFactory));
-					let bearer = '';
-					for (const source of moduleSources) {
-						const match = source.match(/Bearer (AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%_-]+)/);
-						if (match?.[1]?.includes('NRILg')) {
-							bearer = decodeURIComponent(match[1]);
-							break;
-						}
-					}
-					if (!bearer) {
-						for (const source of moduleSources) {
-							const match = source.match(/"(AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%_-]+)"/);
-							if (match?.[1]?.includes('NRILg')) {
-								bearer = decodeURIComponent(match[1]);
-								break;
-							}
-						}
-					}
-					if (!bearer) return null;
-					const cookie = (name: string) => decodeURIComponent(document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]+)`))?.[1] || '');
-					const features = {
-						creator_subscriptions_tweet_preview_api_enabled: true,
-						premium_content_api_read_enabled: false,
-						communities_web_enable_tweet_community_results_fetch: true,
-						c9s_tweet_anatomy_moderator_badge_enabled: true,
-						responsive_web_grok_analyze_button_fetch_trends_enabled: false,
-						responsive_web_grok_analyze_post_followups_enabled: false,
-						responsive_web_jetfuel_frame: true,
-						responsive_web_grok_share_attachment_enabled: true,
-						responsive_web_grok_annotations_enabled: true,
-						articles_preview_enabled: true,
-						responsive_web_edit_tweet_api_enabled: true,
-						graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
-						view_counts_everywhere_api_enabled: true,
-						longform_notetweets_consumption_enabled: true,
-						responsive_web_twitter_article_tweet_consumption_enabled: true,
-						content_disclosure_indicator_enabled: true,
-						content_disclosure_ai_generated_indicator_enabled: true,
-						responsive_web_grok_show_grok_translated_post: true,
-						responsive_web_grok_analysis_button_from_backend: true,
-						post_ctas_fetch_enabled: true,
-						rweb_cashtags_enabled: true,
-						freedom_of_speech_not_reach_fetch_enabled: true,
-						standardized_nudges_misinfo: true,
-						tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
-						longform_notetweets_rich_text_read_enabled: true,
-						longform_notetweets_inline_media_enabled: false,
-						profile_label_improvements_pcf_label_in_post_enabled: true,
-						responsive_web_profile_redirect_enabled: false,
-						rweb_tipjar_consumption_enabled: false,
-						verified_phone_label_enabled: false,
-						responsive_web_grok_image_annotation_enabled: true,
-						responsive_web_grok_imagine_annotation_enabled: true,
-						responsive_web_grok_community_note_auto_translation_is_enabled: true,
-						responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
-						responsive_web_graphql_timeline_navigation_enabled: true,
-						responsive_web_enhance_cards_enabled: false,
-					};
-					const fieldToggles = {
-						withArticleRichContentState: true,
-						withArticlePlainText: false,
-						withArticleSummaryText: true,
-						withArticleVoiceOver: true,
-						withGrokAnalyze: false,
-						withDisallowedReplyControls: false,
-					};
-					const apiUrl = 'https://api.x.com/graphql/fHLDP3qFEjnTqhWBVvsREg/TweetResultByRestId'
-						+ `?variables=${encodeURIComponent(JSON.stringify({ tweetId, withCommunity: false, includePromotedContent: false, withVoice: false }))}`
-						+ `&features=${encodeURIComponent(JSON.stringify(features))}`
-						+ `&fieldToggles=${encodeURIComponent(JSON.stringify(fieldToggles))}`;
-					const headers: Record<string, string> = {
-						authorization: `Bearer ${bearer}`,
-						'x-twitter-active-user': 'yes',
-						'x-twitter-client-language': 'en',
-					};
-					const guestToken = cookie('gt');
-					const csrfToken = cookie('ct0');
-					if (guestToken) headers['x-guest-token'] = guestToken;
-					if (csrfToken) headers['x-csrf-token'] = csrfToken;
-					const controller = new AbortController();
-					const timeout = window.setTimeout(() => controller.abort(), 8000);
-					let data: unknown;
-					try {
-						const response = await fetch(apiUrl, { credentials: 'include', headers, signal: controller.signal });
-						if (!response.ok) return null;
-						data = await response.json();
-					} finally {
-						window.clearTimeout(timeout);
-					}
-					const seen = new Set<unknown>();
-					const stack: unknown[] = [data];
-					const candidates: Array<{ id: string; poster?: string; url: string; bitrate?: number; contentType?: string; source: string }> = [];
-					while (stack.length) {
-						const current = stack.pop();
-						if (!current || typeof current !== 'object' || seen.has(current)) continue;
-						seen.add(current);
-						const object = current as Record<string, unknown>;
-						const mediaInfo = object.media_info as Record<string, unknown> | undefined;
-						const videoInfo = (object.video_info || mediaInfo) as Record<string, unknown> | undefined;
-						if (videoInfo && Array.isArray(videoInfo.variants)) {
-							const previewImage = mediaInfo?.preview_image as Record<string, unknown> | undefined;
-							for (const variant of videoInfo.variants as Array<{ bit_rate?: number; bitrate?: number; content_type?: string; url?: string }>) {
-								if (!variant.url || !/^https:\/\/video\.twimg\.com\/.+\.(?:mp4|m3u8)(?:[?#].*)?$/i.test(variant.url)) continue;
-								candidates.push({
-									id: String(object.id_str || object.media_id || object.media_key || variant.url),
-									poster: typeof object.media_url_https === 'string'
-										? object.media_url_https
-										: typeof previewImage?.original_img_url === 'string'
-											? previewImage.original_img_url
-											: undefined,
-									url: variant.url,
-									bitrate: variant.bitrate || variant.bit_rate,
-									contentType: variant.content_type,
-									source: 'main-world-graphql-inline',
-								});
-							}
-						}
-						for (const value of Object.values(object)) {
-							if (value && typeof value === 'object') stack.push(value);
-						}
-					}
-					const sortedCandidates = candidates.sort((left, right) => {
-						const leftIsMp4 = left.contentType === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(left.url);
-						const rightIsMp4 = right.contentType === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(right.url);
-						if (leftIsMp4 !== rightIsMp4) return leftIsMp4 ? -1 : 1;
-						return (right.bitrate || 0) - (left.bitrate || 0);
-					});
-					const bestById = new Map<string, typeof sortedCandidates[number]>();
-					for (const candidate of sortedCandidates) {
-						if (!bestById.has(candidate.id)) bestById.set(candidate.id, candidate);
-					}
-					const bestCandidates = Array.from(bestById.values());
-					return {
-						candidate: bestCandidates[0] || null,
-						candidates: bestCandidates,
-					};
-				},
+				func: extractXVideoCandidateInMainWorld,
 				args: [url],
 			} as any).then((results: Array<{ result?: unknown }>) => {
 				const result = results[0]?.result as { candidate?: XVideoCandidate | null; candidates?: XVideoCandidate[] } | XVideoCandidate | null | undefined;

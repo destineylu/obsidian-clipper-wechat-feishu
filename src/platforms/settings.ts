@@ -1,10 +1,23 @@
 import browser from '../utils/browser-polyfill';
+import {
+	DEFAULT_FEISHU_BRIDGE_ENDPOINT,
+	LEGACY_FEISHU_BRIDGE_ENDPOINT,
+} from './feishu/bridge-protocol';
 
 const GITHUB_MAX_SAFE_INLINE_TOTAL_BYTES = 40 * 1024 * 1024;
+const FEISHU_BRIDGE_CONFIG_VERSION = 2;
+
+export type FeishuImageMode = 'links' | 'inline-base64' | 'obsidian-bridge';
+export type FeishuAttachmentMode = 'links' | 'obsidian-bridge';
 
 export interface PlatformSettings {
 	feishu: {
 		downloadImages: boolean;
+		imageMode: FeishuImageMode;
+		attachmentMode: FeishuAttachmentMode;
+		bridgeEndpoint: string;
+		bridgePairingToken: string;
+		bridgeConfigVersion: number;
 	};
 	bilibili: {
 		includeTranscript: boolean;
@@ -23,6 +36,11 @@ export interface PlatformSettings {
 export const defaultPlatformSettings: PlatformSettings = {
 	feishu: {
 		downloadImages: false,
+		imageMode: 'links',
+		attachmentMode: 'links',
+		bridgeEndpoint: DEFAULT_FEISHU_BRIDGE_ENDPOINT,
+		bridgePairingToken: '',
+		bridgeConfigVersion: FEISHU_BRIDGE_CONFIG_VERSION,
 	},
 	bilibili: {
 		includeTranscript: true,
@@ -38,7 +56,7 @@ export const defaultPlatformSettings: PlatformSettings = {
 	},
 };
 
-function mergePlatformSettings(raw: Partial<PlatformSettings> | undefined, legacyDownloadImages?: boolean): PlatformSettings {
+export function mergePlatformSettings(raw: Partial<PlatformSettings> | undefined, legacyDownloadImages?: boolean): PlatformSettings {
 	const next: PlatformSettings = {
 		feishu: {
 			...defaultPlatformSettings.feishu,
@@ -61,6 +79,28 @@ function mergePlatformSettings(raw: Partial<PlatformSettings> | undefined, legac
 	if (legacyDownloadImages !== undefined && raw?.feishu?.downloadImages === undefined) {
 		next.feishu.downloadImages = legacyDownloadImages;
 	}
+	if (raw?.feishu?.imageMode === undefined) {
+		next.feishu.imageMode = next.feishu.downloadImages
+			? 'inline-base64'
+			: 'links';
+	}
+	if (raw?.feishu?.attachmentMode === undefined) {
+		next.feishu.attachmentMode = raw?.feishu?.imageMode === 'obsidian-bridge'
+			? 'obsidian-bridge'
+			: 'links';
+	}
+	const normalizedEndpoint = next.feishu.bridgeEndpoint
+		.trim()
+		.replace(/\/+$/, '')
+		.replace('http://localhost:', 'http://127.0.0.1:');
+	if (
+		next.feishu.bridgeConfigVersion < FEISHU_BRIDGE_CONFIG_VERSION &&
+		normalizedEndpoint === LEGACY_FEISHU_BRIDGE_ENDPOINT
+	) {
+		next.feishu.bridgeEndpoint = DEFAULT_FEISHU_BRIDGE_ENDPOINT;
+	}
+	next.feishu.bridgeConfigVersion = FEISHU_BRIDGE_CONFIG_VERSION;
+	next.feishu.downloadImages = next.feishu.imageMode === 'inline-base64';
 	next.github.maxInlineTotalBytes = Math.min(
 		next.github.maxInlineTotalBytes,
 		GITHUB_MAX_SAFE_INLINE_TOTAL_BYTES
@@ -76,7 +116,15 @@ export async function loadPlatformSettings(): Promise<PlatformSettings> {
 	]);
 	const raw = localData.platform_settings as Partial<PlatformSettings> | undefined;
 	const legacyDownloadImages = (syncData.general_settings as { feishuDownloadImages?: boolean } | undefined)?.feishuDownloadImages;
-	return mergePlatformSettings(raw, legacyDownloadImages);
+	const settings = mergePlatformSettings(raw, legacyDownloadImages);
+	if (
+		raw?.feishu?.bridgeConfigVersion !== settings.feishu.bridgeConfigVersion ||
+		raw?.feishu?.bridgeEndpoint !== settings.feishu.bridgeEndpoint ||
+		raw?.feishu?.attachmentMode !== settings.feishu.attachmentMode
+	) {
+		await browser.storage.local.set({ platform_settings: settings });
+	}
+	return settings;
 }
 
 export async function savePlatformSettings(settings: Partial<PlatformSettings>): Promise<PlatformSettings> {
@@ -99,7 +147,23 @@ export async function savePlatformSettings(settings: Partial<PlatformSettings>):
 			...(settings.github || {}),
 		},
 	});
+	if (
+		settings.feishu?.downloadImages !== undefined &&
+		settings.feishu?.imageMode === undefined
+	) {
+		next.feishu.imageMode = settings.feishu.downloadImages
+			? 'inline-base64'
+			: 'links';
+		next.feishu.downloadImages = settings.feishu.downloadImages;
+	}
 
 	await browser.storage.local.set({ platform_settings: next });
 	return next;
+}
+
+export function isFeishuBridgeEnabled(
+	settings: Pick<PlatformSettings['feishu'], 'imageMode' | 'attachmentMode'>
+): boolean {
+	return settings.imageMode === 'obsidian-bridge'
+		|| settings.attachmentMode === 'obsidian-bridge';
 }

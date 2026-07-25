@@ -1,7 +1,6 @@
 import browser from './utils/browser-polyfill';
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 
 function setContent(html: string): void {
 	const app = document.getElementById('app');
@@ -23,6 +22,7 @@ async function loadMedia(): Promise<void> {
 	const urlsParam = params.get('urls');
 	const kind = params.get('kind') === 'video' ? 'video' : 'image';
 	const name = params.get('name') || 'Feishu media';
+	const sourceUrl = params.get('source') || '';
 
 	let urls = url ? [url] : [];
 	if (urlsParam) {
@@ -41,13 +41,23 @@ async function loadMedia(): Promise<void> {
 		return;
 	}
 
+	if (kind === 'video') {
+		const sourceLink = sourceUrl
+			? `<p><a href="${escapeHtml(sourceUrl)}">Open the original Feishu document</a></p>`
+			: '';
+		setContent(`<p>Large Feishu videos are not loaded into extension memory. Open the original document to play or download this video.</p>${sourceLink}`);
+		return;
+	}
+
 	let response: { success?: boolean; data?: { dataUrl?: string; contentType?: string; size?: number }; error?: string } | null = null;
 	let lastError = '';
 	for (const candidateUrl of urls) {
 		response = await browser.runtime.sendMessage({
 			action: 'fetchFeishuMedia',
 			url: candidateUrl,
-			maxBytes: kind === 'video' ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES,
+			maxBytes: MAX_IMAGE_BYTES,
+			requestId: crypto.randomUUID(),
+			timeoutMs: 15_000,
 		}) as { success?: boolean; data?: { dataUrl?: string; contentType?: string; size?: number }; error?: string };
 
 		if (response?.success && response.data?.dataUrl) break;
@@ -56,17 +66,16 @@ async function loadMedia(): Promise<void> {
 
 	if (!response?.success || !response.data?.dataUrl) {
 		const message = escapeHtml(lastError || response?.error || 'Failed to load Feishu media.');
-		setContent(`<p>${message}</p><p><a href="${escapeHtml(urls[0])}">Open raw Feishu media URL</a></p>`);
+		const sourceLink = sourceUrl
+			? `<p><a href="${escapeHtml(sourceUrl)}">Open the original Feishu document</a></p>`
+			: '';
+		setContent(`<p>${message}</p>${sourceLink}`);
 		return;
 	}
 
 	document.title = name;
 	const escapedName = escapeHtml(name);
-	if (kind === 'video') {
-		setContent(`<video controls autoplay src="${response.data.dataUrl}"></video><p>${escapedName}</p>`);
-	} else {
-		setContent(`<img src="${response.data.dataUrl}" alt="${escapedName}"><p>${escapedName}</p>`);
-	}
+	setContent(`<img src="${response.data.dataUrl}" alt="${escapedName}"><p>${escapedName}</p>`);
 }
 
 loadMedia().catch((error) => {

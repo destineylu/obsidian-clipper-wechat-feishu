@@ -1,4 +1,5 @@
 import { ReaderSettings } from '../types/types';
+import type { Template } from '../types/types';
 import type browser from '../utils/browser-polyfill';
 
 export interface PlatformContentContext {
@@ -72,6 +73,21 @@ export interface PlatformReaderEnhanceContext {
 	programmaticScroll: () => boolean;
 }
 
+export interface PlatformObsidianSaveContext {
+	fileContent: string;
+	noteName: string;
+	path: string;
+	vault: string;
+	behavior: Template['behavior'];
+	url: string;
+}
+
+export interface PlatformObsidianSaveResult {
+	handled: boolean;
+	fileContent?: string;
+	notePath?: string;
+}
+
 export interface PlatformModule {
 	id: string;
 	matches(url: string): boolean;
@@ -79,6 +95,7 @@ export interface PlatformModule {
 	afterExtract?(context: PlatformExtractContext): Promise<any> | any;
 	extractStructuredContent?(context: PlatformContentContext): Promise<PlatformStructuredContent | null> | PlatformStructuredContent | null;
 	afterMarkdown?(context: PlatformMarkdownContext): Promise<PlatformMarkdownResult | null> | PlatformMarkdownResult | null;
+	saveToObsidian?(context: PlatformObsidianSaveContext): Promise<PlatformObsidianSaveResult | null> | PlatformObsidianSaveResult | null;
 	registerBackgroundHandlers?(): PlatformBackgroundHandler[];
 	extractReaderContent?(context: PlatformReaderCaptureContext): Promise<PlatformReaderContent | null> | PlatformReaderContent | null;
 	captureReaderState?(context: PlatformReaderCaptureContext): Promise<unknown> | unknown;

@@ -1,8 +1,30 @@
 import browser from '../../utils/browser-polyfill';
 import { PlatformBackgroundHandler } from '../types';
 
-const BILIBILI_EMBED_RULE_ID = 9002;
+const BILIBILI_EMBED_RULE_ID = 91_002;
 let webRequestListenerRegistered = false;
+let tabRemovalListenerRegistered = false;
+let bilibiliRuleUpdateQueue: Promise<void> = Promise.resolve();
+
+interface BilibiliSessionRule {
+	id: number;
+	condition?: {
+		tabIds?: number[];
+	};
+}
+
+interface BilibiliDeclarativeNetRequest {
+	getSessionRules(): Promise<BilibiliSessionRule[]>;
+	updateSessionRules(options: {
+		removeRuleIds: number[];
+		addRules?: unknown[];
+	}): Promise<void>;
+}
+
+export function isBilibiliHostname(hostname: string): boolean {
+	const normalized = hostname.toLowerCase();
+	return normalized === 'bilibili.com' || normalized.endsWith('.bilibili.com');
+}
 
 function isAllowedBilibiliFetchUrl(url: string): boolean {
 	try {
@@ -22,41 +44,71 @@ function isAllowedBilibiliSender(sender: browser.Runtime.MessageSender): boolean
 	if (!senderUrl) return false;
 	try {
 		const url = new URL(senderUrl);
-		return url.hostname.endsWith('bilibili.com')
+		return isBilibiliHostname(url.hostname)
 			|| url.protocol === 'chrome-extension:'
-			|| url.protocol === 'moz-extension:';
+			|| url.protocol === 'moz-extension:'
+			|| url.protocol === 'safari-web-extension:';
 	} catch {
 		return false;
 	}
 }
 
-async function enableBilibiliEmbedRule(tabId: number): Promise<void> {
-	await chrome.declarativeNetRequest.updateSessionRules({
-		removeRuleIds: [BILIBILI_EMBED_RULE_ID],
-		addRules: [{
-			id: BILIBILI_EMBED_RULE_ID,
-			priority: 1,
-			action: {
-				type: 'modifyHeaders' as any,
-				requestHeaders: [{
-					header: 'Referer',
-					operation: 'set' as any,
-					value: 'https://www.bilibili.com/'
-				}]
-			},
-			condition: {
-				urlFilter: '||player.bilibili.com/',
-				resourceTypes: ['sub_frame' as any],
-				tabIds: [tabId]
-			}
-		}]
-	});
+function getBilibiliDeclarativeNetRequest(): BilibiliDeclarativeNetRequest | null {
+	const chromeDnr = typeof chrome !== 'undefined' ? chrome.declarativeNetRequest : undefined;
+	const browserDnr = (browser as unknown as { declarativeNetRequest?: BilibiliDeclarativeNetRequest }).declarativeNetRequest;
+	const dnr = chromeDnr || browserDnr;
+	if (!dnr?.getSessionRules || !dnr?.updateSessionRules) return null;
+	return dnr as unknown as BilibiliDeclarativeNetRequest;
 }
 
-async function disableBilibiliEmbedRule(): Promise<void> {
-	await chrome.declarativeNetRequest.updateSessionRules({
-		removeRuleIds: [BILIBILI_EMBED_RULE_ID]
+function buildBilibiliEmbedRule(tabIds: number[]): unknown {
+	return {
+		id: BILIBILI_EMBED_RULE_ID,
+		priority: 1,
+		action: {
+			type: 'modifyHeaders' as any,
+			requestHeaders: [{
+				header: 'Referer',
+				operation: 'set' as any,
+				value: 'https://www.bilibili.com/'
+			}]
+		},
+		condition: {
+			urlFilter: '||player.bilibili.com/',
+			resourceTypes: ['sub_frame' as any],
+			tabIds,
+		}
+	};
+}
+
+export async function setBilibiliEmbedRuleForTab(
+	tabId: number,
+	enabled: boolean,
+	dnr: BilibiliDeclarativeNetRequest | null = getBilibiliDeclarativeNetRequest()
+): Promise<void> {
+	if (!dnr) return;
+
+	const update = bilibiliRuleUpdateQueue.then(async () => {
+		const currentRules = await dnr.getSessionRules();
+		const currentRule = currentRules.find(rule => rule.id === BILIBILI_EMBED_RULE_ID);
+		const activeTabIds = new Set(
+			(currentRule?.condition?.tabIds || []).filter(id => Number.isInteger(id) && id >= 0)
+		);
+
+		if (enabled) {
+			activeTabIds.add(tabId);
+		} else {
+			activeTabIds.delete(tabId);
+		}
+
+		const tabIds = Array.from(activeTabIds).sort((left, right) => left - right);
+		await dnr.updateSessionRules({
+			removeRuleIds: [BILIBILI_EMBED_RULE_ID],
+			...(tabIds.length ? { addRules: [buildBilibiliEmbedRule(tabIds)] } : {}),
+		});
 	});
+	bilibiliRuleUpdateQueue = update.catch(() => {});
+	return update;
 }
 
 async function fetchBilibiliJson(url: string): Promise<any> {
@@ -101,27 +153,33 @@ function registerBilibiliWebRequestRule(): void {
 
 export function registerBilibiliBackgroundHandlers(): PlatformBackgroundHandler[] {
 	registerBilibiliWebRequestRule();
+	if (!tabRemovalListenerRegistered && browser.tabs?.onRemoved?.addListener) {
+		tabRemovalListenerRegistered = true;
+		browser.tabs.onRemoved.addListener((tabId) => {
+			void setBilibiliEmbedRuleForTab(tabId, false).catch(() => {});
+		});
+	}
 
 	return [({ request, sender, sendResponse }) => {
-		if (request.action === 'enableBilibiliEmbedRule') {
-			const tabId = sender.tab?.id;
-			if (tabId) {
-				enableBilibiliEmbedRule(tabId).then(() => {
-					sendResponse({ success: true });
-				}).catch(() => {
-					sendResponse({ success: true });
-				});
-			} else {
-				sendResponse({ success: true });
+		if (request.action === 'enableBilibiliEmbedRule' || request.action === 'disableBilibiliEmbedRule') {
+			if (!isAllowedBilibiliSender(sender)) {
+				sendResponse({ success: false, error: 'Blocked Bilibili sender' });
+				return true;
 			}
-			return true;
-		}
 
-		if (request.action === 'disableBilibiliEmbedRule') {
-			disableBilibiliEmbedRule().then(() => {
+			const tabId = sender.tab?.id;
+			if (typeof tabId !== 'number') {
+				sendResponse({ success: false, error: 'Missing Bilibili Reader tab ID' });
+				return true;
+			}
+
+			setBilibiliEmbedRuleForTab(tabId, request.action === 'enableBilibiliEmbedRule').then(() => {
 				sendResponse({ success: true });
-			}).catch(() => {
-				sendResponse({ success: true });
+			}).catch((error) => {
+				sendResponse({
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			});
 			return true;
 		}

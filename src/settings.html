@@ -254,7 +254,7 @@
 								<div class="setting-item setting-item-heading"><h3>飞书 / Lark</h3></div>
 								<div class="setting-items">
 									<div class="setting-item-description">
-										Configure Feishu Open Platform credentials to enable complete document extraction from Feishu/Lark. Create an app at <a href="https://open.feishu.cn/app" target="_blank">open.feishu.cn</a> and grant it <strong>docx:document:readonly</strong> and <strong>wiki:node:read</strong> permissions.
+										Configure Feishu Open Platform credentials to enable complete document extraction from Feishu/Lark. Create an app at <a href="https://open.feishu.cn/app" target="_blank">open.feishu.cn</a> and grant it the application-identity permissions <strong>docx:document:readonly</strong>, <strong>docs:document.media:download</strong>, and <strong>wiki:node:read</strong>.
 									</div>
 									<div class="setting-item">
 										<label for="feishu-app-id">App ID</label>
@@ -264,16 +264,50 @@
 										<label for="feishu-app-secret">App Secret</label>
 										<input type="password" id="feishu-app-secret" placeholder="Enter your App Secret" autocomplete="off" spellcheck="false" />
 									</div>
-									<div class="setting-item mod-horizontal mod-toggle">
+									<div class="setting-item mod-horizontal">
 										<div class="setting-item-info">
-											<label for="feishu-download-images-toggle" data-i18n="feishuDownloadImages">Download images</label>
-											<div class="setting-item-description" data-i18n="feishuDownloadImagesDescription">
-												Off by default. Feishu images must be fetched through the Feishu API. GitHub README images use normalized raw links by default because large public repositories render faster and more completely that way. Keep this off for large Feishu documents; turn it on only when you need a complete Feishu image copy. Around 30 Feishu images can become very slow; 50 or more may make the note impossible to open in Obsidian.
+											<label for="feishu-image-mode">图片保存方式</label>
+											<div class="setting-item-description">
+												只控制图片。“Obsidian 配套插件”以二进制附件流写入 Vault，适合图片较多的文档；“Base64 内联”兼容旧流程，但大文档可能很慢或无法打开。
 											</div>
 										</div>
 										<div class="setting-item-control">
-											<div class="checkbox-container">
-												<input type="checkbox" id="feishu-download-images-toggle" />
+											<select id="feishu-image-mode">
+												<option value="links">保留原文链接</option>
+												<option value="obsidian-bridge">Obsidian 配套插件（二进制附件）</option>
+												<option value="inline-base64">Base64 内联（旧方式）</option>
+											</select>
+										</div>
+									</div>
+									<div class="setting-item mod-horizontal">
+										<div class="setting-item-info">
+											<label for="feishu-attachment-mode">视频及大附件</label>
+											<div class="setting-item-description">
+												“保留飞书链接”可节省 Vault 空间；需要完全离线访问时，可通过 Obsidian 配套插件下载为本地附件。
+											</div>
+										</div>
+										<div class="setting-item-control">
+											<select id="feishu-attachment-mode">
+												<option value="links">保留飞书链接（推荐）</option>
+												<option value="obsidian-bridge">下载到 Obsidian 本地</option>
+											</select>
+										</div>
+									</div>
+									<div id="feishu-bridge-settings">
+										<div class="setting-item">
+											<label for="feishu-bridge-endpoint">配套插件地址</label>
+											<input type="url" id="feishu-bridge-endpoint" placeholder="http://127.0.0.1:27125" autocomplete="off" spellcheck="false" />
+										</div>
+										<div class="setting-item">
+											<label for="feishu-bridge-token">配对令牌</label>
+											<input type="password" id="feishu-bridge-token" placeholder="从 Obsidian 配套插件设置复制" autocomplete="new-password" spellcheck="false" />
+										</div>
+										<div class="setting-item mod-horizontal">
+											<div class="setting-item-info">
+												<div class="setting-item-description" id="feishu-bridge-status">尚未测试连接</div>
+											</div>
+											<div class="setting-item-control">
+												<button type="button" id="feishu-bridge-test">测试连接</button>
 											</div>
 										</div>
 									</div>

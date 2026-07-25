@@ -641,6 +641,24 @@
 	"processing": {
 		"message": "processing"
 	},
+	"feishuBridgePreparing": {
+		"message": "Preparing Feishu attachments"
+	},
+	"feishuBridgeDownloading": {
+		"message": "Downloading Feishu attachments"
+	},
+	"feishuBridgeCommitting": {
+		"message": "Writing attachments and note to Obsidian"
+	},
+	"feishuBridgeCompleted": {
+		"message": "Saved to Obsidian"
+	},
+	"feishuBridgeFailed": {
+		"message": "Some Feishu attachments failed"
+	},
+	"feishuBridgeRetryHint": {
+		"message": "Click Add to Obsidian again to resume"
+	},
 	"properties": {
 		"message": "Properties"
 	},

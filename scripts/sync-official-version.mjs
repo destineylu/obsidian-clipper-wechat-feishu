@@ -5,12 +5,15 @@ const root = process.cwd();
 const officialChromeExtensionId = process.env.OFFICIAL_CLIPPER_CHROME_EXTENSION_ID
 	|| 'cnjifjpddelmedmihgijeibhnjfabmlf';
 const officialVersionSource = process.env.OFFICIAL_CLIPPER_VERSION_SOURCE
-	|| 'chrome-web-store';
+	|| 'chrome-web-store,github-main';
+const fetchTimeoutMs = Number.parseInt(process.env.OFFICIAL_CLIPPER_VERSION_FETCH_TIMEOUT_MS || '8000', 10);
+const fetchAttempts = Number.parseInt(process.env.OFFICIAL_CLIPPER_VERSION_FETCH_ATTEMPTS || '2', 10);
 const chromeUpdateUrl = process.env.OFFICIAL_CLIPPER_CHROME_UPDATE_URL
 	|| `https://clients2.google.com/service/update2/crx?response=updatecheck&prodversion=120.0.0.0&acceptformat=crx3&x=id%3D${officialChromeExtensionId}%26uc`;
 const officialPackageUrl = process.env.OFFICIAL_CLIPPER_PACKAGE_URL
 	|| 'https://raw.githubusercontent.com/obsidianmd/obsidian-clipper/main/package.json';
 const required = process.argv.includes('--required');
+const checkOnly = process.argv.includes('--check');
 const explicitVersionArg = process.argv.find(arg => arg.startsWith('--version='));
 const explicitVersion = explicitVersionArg?.slice('--version='.length) || process.env.OFFICIAL_CLIPPER_VERSION;
 
@@ -45,6 +48,25 @@ function toManifestVersion(version) {
 	return stableVersion;
 }
 
+async function fetchWithRetry(url, options, label) {
+	const attempts = Number.isInteger(fetchAttempts) && fetchAttempts > 0 ? fetchAttempts : 1;
+	const timeoutMs = Number.isInteger(fetchTimeoutMs) && fetchTimeoutMs > 0 ? fetchTimeoutMs : 8000;
+	const errors = [];
+
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		try {
+			return await fetch(url, {
+				...options,
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	throw new Error(`${label} failed after ${attempts} attempt(s): ${errors.join('; ')}`);
+}
+
 async function fetchOfficialVersion() {
 	if (explicitVersion) return explicitVersion;
 
@@ -64,10 +86,9 @@ async function fetchOfficialVersion() {
 }
 
 async function fetchChromeWebStoreVersion() {
-	const response = await fetch(chromeUpdateUrl, {
+	const response = await fetchWithRetry(chromeUpdateUrl, {
 		headers: { Accept: 'application/xml,text/xml,*/*' },
-		signal: AbortSignal.timeout(8000),
-	});
+	}, 'Chrome Web Store version request');
 	if (!response.ok) {
 		throw new Error(`HTTP ${response.status} while fetching Chrome Web Store update metadata`);
 	}
@@ -81,10 +102,9 @@ async function fetchChromeWebStoreVersion() {
 }
 
 async function fetchGithubMainVersion() {
-	const response = await fetch(officialPackageUrl, {
+	const response = await fetchWithRetry(officialPackageUrl, {
 		headers: { Accept: 'application/json' },
-		signal: AbortSignal.timeout(8000),
-	});
+	}, 'GitHub official package request');
 	if (!response.ok) {
 		throw new Error(`HTTP ${response.status} while fetching ${officialPackageUrl}`);
 	}
@@ -114,6 +134,17 @@ if (!isSemver(officialVersion)) {
 }
 
 const manifestVersion = toManifestVersion(officialVersion);
+if (checkOnly) {
+	const current = currentVersion();
+	if (current !== officialVersion) {
+		console.error(`[sync-official-version] Official version ${officialVersion} is available; this source tree is still ${current}.`);
+		console.error('[sync-official-version] Perform a complete official source sync before changing package or manifest versions.');
+		process.exit(1);
+	}
+	console.log(`[sync-official-version] Source version ${current} matches the official released version.`);
+	process.exit(0);
+}
+
 const touched = [];
 
 const packageJson = readJson('package.json');

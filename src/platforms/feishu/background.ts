@@ -1,7 +1,123 @@
 import browser from '../../utils/browser-polyfill';
+import type { Template } from '../../types/types';
+import {
+	isFeishuBridgeEnabled,
+	loadPlatformSettings,
+} from '../settings';
 import { PlatformBackgroundHandler } from '../types';
+import {
+	FeishuBridgeClient,
+	FeishuBridgeRequestError,
+	type FeishuBridgeUploadOptions,
+} from './bridge-client';
+import {
+	createFeishuSessionContent,
+	DEFAULT_FEISHU_BRIDGE_ASSET_MAX_BYTES,
+	extractFeishuBridgeAssets,
+	feishuBridgeMarkerKind,
+	FEISHU_BRIDGE_RESUMABLE_CAPABILITY,
+	replaceFeishuBridgeAsset,
+	type FeishuBridgeCommitResponse,
+	type FeishuBridgeCreateSessionRequest,
+	type FeishuBridgeCreateSessionResponse,
+	type FeishuBridgeCreateTransactionRequest,
+	type FeishuBridgeCreateTransactionResponse,
+	type FeishuBridgeHealthResponse,
+	type FeishuBridgeAssetMarker,
+	type FeishuBridgeQueueAssetsRequest,
+	type FeishuBridgeRemoteAssetRequest,
+	type FeishuBridgeSessionStatus,
+	type FeishuBridgeUploadAssetResponse,
+} from './bridge-protocol';
+import {
+	clearFeishuBridgeProgress,
+	loadFeishuBridgeProgress,
+	saveFeishuBridgeProgress,
+} from './bridge-progress';
+import {
+	buildFeishuMediaDownloadLinks,
+	isAllowedFeishuDirectMediaUrl,
+} from './extractor';
+
+export { isAllowedFeishuDirectMediaUrl } from './extractor';
 
 let feishuTokenCache: { token: string; expiresAt: number } | null = null;
+const activeFeishuMediaRequests = new Map<string, AbortController>();
+const DEFAULT_FEISHU_MEDIA_TIMEOUT_MS = 8_000;
+const MAX_FEISHU_MEDIA_TIMEOUT_MS = 30_000;
+const MAX_FEISHU_MEDIA_RESPONSE_BYTES = 20 * 1024 * 1024;
+const FEISHU_BRIDGE_TRANSFER_TIMEOUT_MS = 15 * 60_000;
+const FEISHU_BRIDGE_RESUMABLE_WAIT_TIMEOUT_MS = 12 * 60 * 60_000;
+const FEISHU_BRIDGE_UPLOAD_CONCURRENCY = 2;
+const FEISHU_BRIDGE_URL_RESOLVE_CONCURRENCY = 6;
+const FEISHU_BRIDGE_RESUMABLE_ASSET_THRESHOLD = 40;
+
+export interface FeishuBridgeTransferInput {
+	fileContent: string;
+	notePath: string;
+	behavior: Extract<
+		Template['behavior'],
+		'create' | 'overwrite' | 'append-specific' | 'prepend-specific'
+	>;
+	sourceUrl: string;
+	vault: string;
+}
+
+interface FeishuBridgeTransferClient {
+	health(signal?: AbortSignal): Promise<FeishuBridgeHealthResponse>;
+	createTransaction(
+		request: FeishuBridgeCreateTransactionRequest,
+		signal?: AbortSignal
+	): Promise<FeishuBridgeCreateTransactionResponse>;
+	uploadAsset(
+		transactionId: string,
+		index: number,
+		options: FeishuBridgeUploadOptions
+	): Promise<FeishuBridgeUploadAssetResponse>;
+	commitTransaction(
+		transactionId: string,
+		content: string,
+		signal?: AbortSignal
+	): Promise<FeishuBridgeCommitResponse>;
+	abortTransaction(transactionId: string, signal?: AbortSignal): Promise<void>;
+	createSession(
+		request: FeishuBridgeCreateSessionRequest,
+		signal?: AbortSignal
+	): Promise<FeishuBridgeCreateSessionResponse>;
+	getSessionStatus(
+		sessionId: string,
+		signal?: AbortSignal
+	): Promise<FeishuBridgeSessionStatus>;
+	queueSessionAssets(
+		sessionId: string,
+		request: FeishuBridgeQueueAssetsRequest,
+		signal?: AbortSignal
+	): Promise<FeishuBridgeSessionStatus>;
+	retrySessionCommit(
+		sessionId: string,
+		signal?: AbortSignal
+	): Promise<FeishuBridgeSessionStatus>;
+	abortSession(sessionId: string, signal?: AbortSignal): Promise<void>;
+}
+
+interface FeishuBridgeDownloadedAsset {
+	body: BodyInit;
+	filename: string;
+	contentType: string;
+	byteLength?: number;
+}
+
+export interface FeishuBridgeTransferDependencies {
+	client: FeishuBridgeTransferClient;
+	downloadAsset(
+		asset: Pick<
+			FeishuBridgeAssetMarker,
+			'token' | 'alt' | 'fallbackUrl' | 'downloadKind'
+		>,
+		sourceUrl: string,
+		signal: AbortSignal
+	): Promise<FeishuBridgeDownloadedAsset>;
+}
 
 function isAllowedFeishuFetchUrl(url: string): boolean {
 	try {
@@ -13,6 +129,8 @@ function isAllowedFeishuFetchUrl(url: string): boolean {
 	}
 }
 
+export const isAllowedFeishuBridgeDirectMediaUrl = isAllowedFeishuDirectMediaUrl;
+
 function isAllowedFeishuSender(sender: browser.Runtime.MessageSender): boolean {
 	const senderUrl = sender.tab?.url || sender.url || '';
 	if (!senderUrl) return false;
@@ -21,7 +139,8 @@ function isAllowedFeishuSender(sender: browser.Runtime.MessageSender): boolean {
 		return url.hostname.endsWith('.feishu.cn')
 			|| url.hostname.endsWith('.larksuite.com')
 			|| url.protocol === 'chrome-extension:'
-			|| url.protocol === 'moz-extension:';
+			|| url.protocol === 'moz-extension:'
+			|| url.protocol === 'safari-web-extension:';
 	} catch {
 		return false;
 	}
@@ -42,6 +161,7 @@ async function getFeishuTenantToken(): Promise<string> {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json; charset=utf-8' },
 		body: JSON.stringify({ app_id: settings.appId, app_secret: settings.appSecret }),
+		signal: AbortSignal.timeout(15_000),
 	});
 
 	if (!response.ok) {
@@ -81,25 +201,128 @@ async function fetchFeishuApi(url: string, options?: { method?: string; body?: s
 		headers['Content-Type'] = 'application/json; charset=utf-8';
 	}
 
-	const fetchOptions: RequestInit = { method, headers, cache: 'no-store' };
+	const fetchOptions: RequestInit = {
+		method,
+		headers,
+		cache: 'no-store',
+		signal: AbortSignal.timeout(15_000),
+	};
 	if (options?.body && method !== 'GET') {
 		fetchOptions.body = options.body;
 	}
 
 	const response = await fetch(url, fetchOptions);
 	if (!response.ok) {
-		throw new Error(`Feishu API HTTP ${response.status}: ${url}`);
+		throw new Error(`Feishu API HTTP ${response.status}`);
 	}
 
 	const result = await response.json();
 	if (result.code && result.code !== 0) {
-		throw new Error(`Feishu API error ${result.code}: ${result.msg || 'unknown'} (${url})`);
+		throw new Error(`Feishu API error ${result.code}: ${result.msg || 'unknown'}`);
 	}
 
 	return result;
 }
 
-async function fetchFeishuMedia(url: string, maxBytes?: number): Promise<{ dataUrl: string; contentType: string; size: number }> {
+function normalizePositiveInteger(value: unknown, fallback: number, maximum: number): number {
+	if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return fallback;
+	return Math.min(Math.floor(value), maximum);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+	const chunkSize = 0x8000;
+	let binary = '';
+	for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+		const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+		binary += String.fromCharCode(...chunk);
+	}
+	return btoa(binary);
+}
+
+async function readBoundedFeishuMediaBytes(
+	response: Response,
+	maxBytes: number
+): Promise<{ bytes: Uint8Array; contentType: string; size: number }> {
+	const contentLengthHeader = response.headers.get('content-length');
+	const contentLength = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : Number.NaN;
+	if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+		await response.body?.cancel();
+		throw new Error(`Feishu media too large (${contentLength} bytes)`);
+	}
+	if (!response.body) {
+		throw new Error('Feishu media response does not support safe streaming');
+	}
+
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value?.byteLength) continue;
+			size += value.byteLength;
+			if (size > maxBytes) {
+				await reader.cancel();
+				throw new Error(`Feishu media too large (${size} bytes)`);
+			}
+			chunks.push(value);
+		}
+	} catch (error) {
+		await reader.cancel().catch(() => {});
+		throw error;
+	}
+
+	const bytes = new Uint8Array(size);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	const rawContentType = response.headers.get('content-type') || 'application/octet-stream';
+	const contentType = rawContentType.split(';', 1)[0].trim() || 'application/octet-stream';
+	return { bytes, contentType, size };
+}
+
+export async function readFeishuMediaResponse(
+	response: Response,
+	maxBytes: number
+): Promise<{ dataUrl: string; contentType: string; size: number }> {
+	const { bytes, contentType, size } = await readBoundedFeishuMediaBytes(
+		response,
+		maxBytes
+	);
+	return {
+		dataUrl: `data:${contentType};base64,${bytesToBase64(bytes)}`,
+		contentType,
+		size,
+	};
+}
+
+export async function readFeishuBridgeBinaryResponse(
+	response: Response,
+	maxBytes: number
+): Promise<{ body: Blob; contentType: string; size: number }> {
+	const { bytes, contentType, size } = await readBoundedFeishuMediaBytes(
+		response,
+		maxBytes
+	);
+	// Chromium extension fetch cannot forward a response ReadableStream directly
+	// to a cross-origin loopback request. A bounded Blob keeps the payload binary
+	// without the Base64 expansion or runtime-message copy used by the legacy mode.
+	return {
+		body: new Blob([bytes], { type: contentType }),
+		contentType,
+		size,
+	};
+}
+
+async function fetchFeishuMedia(
+	url: string,
+	maxBytes: number,
+	signal: AbortSignal
+): Promise<{ dataUrl: string; contentType: string; size: number }> {
 	if (!isAllowedFeishuFetchUrl(url)) {
 		throw new Error('Blocked Feishu fetch URL');
 	}
@@ -111,50 +334,875 @@ async function fetchFeishuMedia(url: string, maxBytes?: number): Promise<{ dataU
 		headers: {
 			Authorization: `Bearer ${token}`,
 		},
+		signal,
 	});
 
 	if (!response.ok) {
-		throw new Error(`Feishu media HTTP ${response.status}: ${url}`);
+		throw new Error(`Feishu media HTTP ${response.status}`);
 	}
 
-	const blob = await response.blob();
-	if (maxBytes && blob.size > maxBytes) {
-		throw new Error(`Feishu media too large (${blob.size} bytes)`);
-	}
+	return readFeishuMediaResponse(response, maxBytes);
+}
 
-	const dataUrl = await new Promise<string>((resolve, reject) => {
-		const reader = new FileReader();
-		reader.onload = () => {
-			if (typeof reader.result === 'string') {
-				resolve(reader.result);
-			} else {
-				reject(new Error('Unexpected FileReader result for Feishu media'));
-			}
-		};
-		reader.onerror = () => reject(reader.error || new Error('Failed to read Feishu media blob'));
-		reader.readAsDataURL(blob);
-	});
-
-	return {
-		dataUrl,
-		contentType: blob.type || response.headers.get('content-type') || 'application/octet-stream',
-		size: blob.size,
+function mediaExtension(contentType: string): string {
+	const extensions: Record<string, string> = {
+		'image/avif': '.avif',
+		'image/bmp': '.bmp',
+		'image/gif': '.gif',
+		'image/jpeg': '.jpg',
+		'image/png': '.png',
+		'image/svg+xml': '.svg',
+		'image/webp': '.webp',
 	};
+	return extensions[contentType] || '.bin';
+}
+
+function buildBridgeAssetFilename(alt: string, contentType: string): string {
+	const cleanAlt = alt
+		.replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '-')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 80) || 'feishu-image';
+	return /\.[a-z0-9]{2,8}$/i.test(cleanAlt)
+		? cleanAlt
+		: `${cleanAlt}${mediaExtension(contentType)}`;
+}
+
+interface FeishuBridgeOpenedAsset {
+	response: Response;
+	filename: string;
+	contentType: string;
+	byteLength?: number;
+}
+
+async function validateFeishuBridgeAssetResponse(
+	response: Response,
+	alt: string,
+	maxBytes: number,
+	errorPrefix: string
+): Promise<FeishuBridgeOpenedAsset> {
+	if (!response.ok || !response.body) {
+		await response.body?.cancel().catch(() => undefined);
+		throw new Error(`${errorPrefix} (HTTP ${response.status})`);
+	}
+	const contentLengthHeader = response.headers.get('content-length');
+	const declaredBytes = contentLengthHeader === null
+		? undefined
+		: Number(contentLengthHeader);
+	if (
+		declaredBytes !== undefined &&
+		(
+			!Number.isSafeInteger(declaredBytes) ||
+			declaredBytes <= 0 ||
+			declaredBytes > maxBytes
+		)
+	) {
+		await response.body.cancel().catch(() => undefined);
+		throw new Error(
+			declaredBytes === 0
+				? '飞书媒体返回了空文件'
+				: '飞书媒体超过本地附件大小限制'
+		);
+	}
+	const rawContentType =
+		response.headers.get('content-type') || 'application/octet-stream';
+	const contentType =
+		rawContentType.split(';', 1)[0].trim() || 'application/octet-stream';
+	return {
+		response,
+		filename: buildBridgeAssetFilename(alt, contentType),
+		contentType,
+		...(declaredBytes !== undefined ? { byteLength: declaredBytes } : {}),
+	};
+}
+
+async function openFeishuBridgeDirectAsset(
+	directUrl: string,
+	alt: string,
+	maxBytes: number,
+	signal: AbortSignal
+): Promise<FeishuBridgeOpenedAsset> {
+	if (!isAllowedFeishuBridgeDirectMediaUrl(directUrl)) {
+		throw new Error('飞书页面媒体地址不在允许范围内');
+	}
+	const response = await fetch(directUrl, {
+		method: 'GET',
+		cache: 'no-store',
+		credentials: 'omit',
+		signal,
+	});
+	return validateFeishuBridgeAssetResponse(
+		response,
+		alt,
+		maxBytes,
+		'飞书页面媒体下载失败'
+	);
+}
+
+async function downloadFeishuBridgeDirectAsset(
+	directUrl: string,
+	alt: string,
+	signal: AbortSignal
+): Promise<FeishuBridgeDownloadedAsset> {
+	const opened = await openFeishuBridgeDirectAsset(
+		directUrl,
+		alt,
+		DEFAULT_FEISHU_BRIDGE_ASSET_MAX_BYTES,
+		signal
+	);
+	const downloaded = await readFeishuBridgeBinaryResponse(
+		opened.response,
+		DEFAULT_FEISHU_BRIDGE_ASSET_MAX_BYTES
+	);
+	return {
+		body: downloaded.body,
+		filename: opened.filename,
+		contentType: downloaded.contentType,
+		byteLength: downloaded.size,
+	};
+}
+
+async function getFeishuTemporaryMediaUrl(
+	sourceUrl: string,
+	mediaToken: string,
+	tenantToken: string,
+	signal: AbortSignal
+): Promise<{ url?: string; status?: number }> {
+	const urls = buildFeishuMediaDownloadLinks(sourceUrl, mediaToken, 'image');
+	const openApiOrigin = urls.length ? new URL(urls[0]).origin : '';
+	if (!openApiOrigin) return {};
+	const endpoints = [
+		// Current Open Platform route.
+		`${openApiOrigin}/open-apis/drive/v1/media/batch_get_tmp_download_url?file_tokens=${encodeURIComponent(mediaToken)}`,
+		// Legacy route retained for compatibility.
+		`${openApiOrigin}/open-apis/drive/v1/medias/batch_get_tmp_download_url?file_tokens=${encodeURIComponent(mediaToken)}`,
+	].filter(isAllowedFeishuFetchUrl);
+	let lastStatus: number | undefined;
+
+	for (const endpoint of endpoints) {
+		const response = await fetch(endpoint, {
+			method: 'GET',
+			cache: 'no-store',
+			headers: { Authorization: `Bearer ${tenantToken}` },
+			signal,
+		});
+		lastStatus = response.status;
+		if (!response.ok) {
+			await response.body?.cancel().catch(() => undefined);
+			continue;
+		}
+
+		const result = await response.json() as {
+			code?: number;
+			data?: {
+				tmp_download_urls?: Array<{
+					file_token?: string;
+					tmp_download_url?: string;
+				}>;
+			};
+		};
+		const match = result.code === 0 || typeof result.code === 'undefined'
+			? result.data?.tmp_download_urls?.find(
+				item => item.file_token === mediaToken
+			)
+			: undefined;
+		if (
+			match?.tmp_download_url &&
+			isAllowedFeishuBridgeDirectMediaUrl(match.tmp_download_url)
+		) {
+			return { url: match.tmp_download_url, status: response.status };
+		}
+	}
+
+	return { status: lastStatus };
+}
+
+async function openFeishuBridgeAsset(
+	asset: Pick<
+		FeishuBridgeAssetMarker,
+		'token' | 'alt' | 'fallbackUrl' | 'downloadKind'
+	>,
+	sourceUrl: string,
+	maxBytes: number,
+	signal: AbortSignal
+): Promise<FeishuBridgeOpenedAsset> {
+	if (asset.token.startsWith('remote:')) {
+		return openFeishuBridgeDirectAsset(
+			asset.token.slice('remote:'.length),
+			asset.alt,
+			maxBytes,
+			signal
+		);
+	}
+
+	const urls = buildFeishuMediaDownloadLinks(
+		sourceUrl,
+		asset.token,
+		asset.downloadKind
+	);
+	let lastStatus = 0;
+	let apiError: unknown;
+
+	try {
+		const token = await getFeishuTenantToken();
+		for (const url of urls) {
+			if (signal.aborted) throw new Error('飞书附件传输已取消');
+			if (!isAllowedFeishuFetchUrl(url)) continue;
+			const response = await fetch(url, {
+				method: 'GET',
+				cache: 'no-store',
+				headers: { Authorization: `Bearer ${token}` },
+				signal,
+			});
+			lastStatus = response.status;
+			if (!response.ok) {
+				await response.body?.cancel().catch(() => undefined);
+				continue;
+			}
+			return await validateFeishuBridgeAssetResponse(
+				response,
+				asset.alt,
+				maxBytes,
+				'飞书媒体下载失败'
+			);
+		}
+
+		const temporary = await getFeishuTemporaryMediaUrl(
+			sourceUrl,
+			asset.token,
+			token,
+			signal
+		);
+		lastStatus = temporary.status || lastStatus;
+		if (temporary.url) {
+			return await openFeishuBridgeDirectAsset(
+				temporary.url,
+				asset.alt,
+				maxBytes,
+				signal
+			);
+		}
+	} catch (error) {
+		if (signal.aborted) {
+			throw signal.reason instanceof Error
+				? signal.reason
+				: new Error('飞书附件传输已取消');
+		}
+		apiError = error;
+	}
+
+	if (asset.fallbackUrl) {
+		return openFeishuBridgeDirectAsset(
+			asset.fallbackUrl,
+			asset.alt,
+			maxBytes,
+			signal
+		);
+	}
+
+	if (apiError && !lastStatus) {
+		throw apiError;
+	}
+
+	throw new Error(
+		lastStatus
+			? `飞书图片下载失败 (HTTP ${lastStatus})`
+			: '没有可用的飞书图片下载地址'
+	);
+}
+
+export async function downloadFeishuBridgeAsset(
+	asset: Pick<
+		FeishuBridgeAssetMarker,
+		'token' | 'alt' | 'fallbackUrl' | 'downloadKind'
+	>,
+	sourceUrl: string,
+	signal: AbortSignal
+): Promise<FeishuBridgeDownloadedAsset> {
+	const opened = await openFeishuBridgeAsset(
+		asset,
+		sourceUrl,
+		DEFAULT_FEISHU_BRIDGE_ASSET_MAX_BYTES,
+		signal
+	);
+	const downloaded = await readFeishuBridgeBinaryResponse(
+		opened.response,
+		DEFAULT_FEISHU_BRIDGE_ASSET_MAX_BYTES
+	);
+	return {
+		body: downloaded.body,
+		filename: opened.filename,
+		contentType: downloaded.contentType,
+		byteLength: downloaded.size,
+	};
+}
+
+function sourceOrigin(sourceUrl: string): string {
+	try {
+		return new URL(sourceUrl).origin;
+	} catch {
+		return '';
+	}
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+	return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function stableFeishuAssetIdentity(asset: FeishuBridgeAssetMarker): string {
+	if (!asset.token.startsWith('remote:')) return asset.token;
+	try {
+		const url = new URL(asset.token.slice('remote:'.length));
+		return `remote:${url.origin}${url.pathname}`;
+	} catch {
+		return asset.token;
+	}
+}
+
+async function sha256Hex(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		'SHA-256',
+		new TextEncoder().encode(value)
+	);
+	return bytesToHex(new Uint8Array(digest));
+}
+
+export async function buildFeishuBridgeSourceKey(
+	sourceUrl: string
+): Promise<string> {
+	return sha256Hex(sourceUrl);
+}
+
+export async function buildFeishuBridgeResumeKey(
+	input: FeishuBridgeTransferInput,
+	assets: FeishuBridgeAssetMarker[]
+): Promise<string> {
+	return sha256Hex([
+			input.sourceUrl,
+			input.notePath,
+			input.behavior,
+			...assets.map(asset => [
+				asset.kind,
+				asset.downloadKind,
+				stableFeishuAssetIdentity(asset),
+				asset.occurrences,
+			].join('\u0001')),
+		].join('\u0000'));
+}
+
+function resumableAssetFilename(
+	asset: FeishuBridgeAssetMarker,
+	index: number
+): string {
+	const cleaned = asset.alt
+		.replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '-')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 80);
+	return cleaned || `feishu-${asset.kind}-${index}`;
+}
+
+export async function resolveFeishuRemoteAssetRequests(
+	assets: FeishuBridgeAssetMarker[],
+	indexes: number[],
+	sourceUrl: string,
+	signal: AbortSignal
+): Promise<FeishuBridgeRemoteAssetRequest[]> {
+	const tenantToken = await getFeishuTenantToken();
+	const results = new Array<FeishuBridgeRemoteAssetRequest>(indexes.length);
+	let nextIndex = 0;
+	const workerCount = Math.min(
+		FEISHU_BRIDGE_URL_RESOLVE_CONCURRENCY,
+		indexes.length
+	);
+	await Promise.all(Array.from({ length: workerCount }, async () => {
+		while (!signal.aborted) {
+			const resultIndex = nextIndex++;
+			const assetIndex = indexes[resultIndex];
+			if (assetIndex === undefined) return;
+			const asset = assets[assetIndex];
+			const isRemoteAsset = asset.token.startsWith('remote:');
+			let downloadUrl = isRemoteAsset
+				? asset.token.slice('remote:'.length)
+				: asset.fallbackUrl || '';
+			const authenticatedUrls = isRemoteAsset
+				? []
+				: buildFeishuMediaDownloadLinks(
+					sourceUrl,
+					asset.token,
+					asset.downloadKind
+				).filter(isAllowedFeishuFetchUrl);
+			let fallbackDownloadUrls: string[] = [];
+			if (downloadUrl && !isAllowedFeishuBridgeDirectMediaUrl(downloadUrl)) {
+				downloadUrl = '';
+			}
+			if (!downloadUrl && !isRemoteAsset) {
+				const temporary = await getFeishuTemporaryMediaUrl(
+					sourceUrl,
+					asset.token,
+					tenantToken,
+					signal
+				);
+				downloadUrl = temporary.url || '';
+			}
+			if (!downloadUrl) {
+				downloadUrl = authenticatedUrls[0] || '';
+				fallbackDownloadUrls = authenticatedUrls.slice(1);
+			} else {
+				fallbackDownloadUrls = authenticatedUrls.filter(
+					url => url !== downloadUrl
+				);
+			}
+			if (!downloadUrl) {
+				throw new Error(`第 ${assetIndex + 1} 个飞书媒体没有可用下载地址`);
+			}
+			results[resultIndex] = {
+				index: assetIndex,
+				kind: asset.kind,
+				filename: resumableAssetFilename(asset, assetIndex),
+				downloadUrl,
+				...(fallbackDownloadUrls.length ||
+				authenticatedUrls.includes(downloadUrl)
+					? {
+						...(fallbackDownloadUrls.length
+							? { fallbackDownloadUrls }
+							: {}),
+						bearerToken: tenantToken,
+					}
+					: {}),
+			};
+		}
+	}));
+	return results;
+}
+
+async function publishFeishuBridgeProgress(
+	sourceUrl: string,
+	status: FeishuBridgeSessionStatus
+): Promise<void> {
+	const progress = await saveFeishuBridgeProgress(sourceUrl, status);
+	await browser.runtime.sendMessage({
+		action: 'feishuBridgeProgress',
+		progress,
+	}).catch(() => undefined);
+}
+
+function waitForBridgePoll(
+	signal: AbortSignal,
+	delayMs = 1_000
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const finish = () => {
+			signal.removeEventListener('abort', onAbort);
+			resolve();
+		};
+		const timer = setTimeout(finish, delayMs);
+		const onAbort = () => {
+			clearTimeout(timer);
+			signal.removeEventListener('abort', onAbort);
+			reject(
+				signal.reason instanceof Error
+					? signal.reason
+					: new Error('飞书附件传输已取消')
+			);
+		};
+		if (signal.aborted) {
+			onAbort();
+		} else {
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+	});
+}
+
+export interface FeishuBridgeResumableTransferDependencies {
+	client: FeishuBridgeTransferClient;
+	resolveAssets?(
+		assets: FeishuBridgeAssetMarker[],
+		indexes: number[],
+		sourceUrl: string,
+		signal: AbortSignal
+	): Promise<FeishuBridgeRemoteAssetRequest[]>;
+	publishProgress?(
+		sourceUrl: string,
+		status: FeishuBridgeSessionStatus
+	): Promise<void>;
+	pollDelay?(signal: AbortSignal): Promise<void>;
+}
+
+export function hasFeishuBridgeUnauthorizedAssets(
+	status: FeishuBridgeSessionStatus
+): boolean {
+	return status.assets.some(asset =>
+		asset.state === 'failed' &&
+		typeof asset.error === 'string' &&
+		/\bHTTP 401\b/i.test(asset.error)
+	);
+}
+
+export async function transferFeishuNoteWithResumableBridge(
+	input: FeishuBridgeTransferInput,
+	dependencies: FeishuBridgeResumableTransferDependencies
+): Promise<FeishuBridgeCommitResponse> {
+	const assets = extractFeishuBridgeAssets(input.fileContent);
+	if (!assets.length) {
+		throw new Error('剪藏内容中没有待传输的飞书媒体');
+	}
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(new Error('飞书可恢复附件传输等待超时')),
+		FEISHU_BRIDGE_RESUMABLE_WAIT_TIMEOUT_MS
+	);
+	const publish = dependencies.publishProgress ?? publishFeishuBridgeProgress;
+	const resolveAssets =
+		dependencies.resolveAssets ?? resolveFeishuRemoteAssetRequests;
+	const pollDelay =
+		dependencies.pollDelay ?? ((signal: AbortSignal) => waitForBridgePoll(signal));
+
+	try {
+		const health = await dependencies.client.health(controller.signal);
+		if (!health.ready) throw new Error('Obsidian 配套插件尚未就绪');
+		if (
+			!health.capabilities?.includes(FEISHU_BRIDGE_RESUMABLE_CAPABILITY)
+		) {
+			throw new Error('Obsidian 配套插件尚不支持可恢复媒体传输');
+		}
+		if (input.vault && health.vaultName && input.vault !== health.vaultName) {
+			throw new Error(
+				`当前 Obsidian Vault 为“${health.vaultName}”，与剪藏目标 Vault 不一致`
+			);
+		}
+		const [resumeKey, sourceKey] = await Promise.all([
+			buildFeishuBridgeResumeKey(input, assets),
+			buildFeishuBridgeSourceKey(input.sourceUrl),
+		]);
+		const created = await dependencies.client.createSession({
+			resumeKey,
+			sourceKey,
+			note: {
+				path: input.notePath,
+				behavior: input.behavior,
+				content: createFeishuSessionContent(input.fileContent, assets),
+			},
+			sourceOrigin: sourceOrigin(input.sourceUrl),
+			assets: assets.map((asset, index) => ({
+				index,
+				kind: asset.kind,
+				alt: asset.alt,
+			})),
+		}, controller.signal);
+		let status = created.status;
+		await publish(input.sourceUrl, status);
+		if (status.phase !== 'completed') {
+			const missingIndexes = status.assets
+				.filter(asset => asset.state !== 'completed')
+				.map(asset => asset.index);
+			if (missingIndexes.length) {
+				if (hasFeishuBridgeUnauthorizedAssets(status)) {
+					// Permissions may have been published after this token was
+					// issued, or a long-running transfer may have outlived it.
+					feishuTokenCache = null;
+				}
+				const queue = await resolveAssets(
+					assets,
+					missingIndexes,
+					input.sourceUrl,
+					controller.signal
+				);
+				status = await dependencies.client.queueSessionAssets(
+					created.sessionId,
+					{ assets: queue },
+					controller.signal
+				);
+				await publish(input.sourceUrl, status);
+			}
+		}
+
+		while (status.phase !== 'completed') {
+			if (
+				status.phase === 'failed' &&
+				(status.failedAssets > 0 || status.error)
+			) {
+				throw new Error(
+					status.error ||
+					`${status.failedAssets} 个飞书媒体下载失败，重新点击可继续`
+				);
+			}
+			await pollDelay(controller.signal);
+			status = await dependencies.client.getSessionStatus(
+				created.sessionId,
+				controller.signal
+			);
+			await publish(input.sourceUrl, status);
+		}
+
+		return {
+			notePath: status.notePath || input.notePath,
+			assetPaths: status.assets
+				.sort((left, right) => left.index - right.index)
+				.flatMap(asset => asset.vaultPath ? [asset.vaultPath] : []),
+		};
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+export async function transferFeishuNoteWithBridge(
+	input: FeishuBridgeTransferInput,
+	dependencies: FeishuBridgeTransferDependencies
+): Promise<FeishuBridgeCommitResponse> {
+	const assets = extractFeishuBridgeAssets(input.fileContent);
+	if (!assets.length) {
+		throw new Error('剪藏内容中没有待传输的飞书图片');
+	}
+
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(new Error(
+			'飞书附件传输超过 15 分钟，请确认网络和 Obsidian 配套插件后重试'
+		)),
+		FEISHU_BRIDGE_TRANSFER_TIMEOUT_MS
+	);
+	let transactionId = '';
+
+	try {
+		const health = await dependencies.client.health(controller.signal);
+		if (!health.ready) throw new Error('Obsidian 配套插件尚未就绪');
+		if (input.vault && health.vaultName && input.vault !== health.vaultName) {
+			throw new Error(
+				`当前 Obsidian Vault 为“${health.vaultName}”，与剪藏目标 Vault 不一致`
+			);
+		}
+
+		const transaction = await dependencies.client.createTransaction({
+			note: {
+				path: input.notePath,
+				behavior: input.behavior,
+				// Do not disclose Feishu media or document tokens to the companion.
+				content: '',
+			},
+			sourceUrl: sourceOrigin(input.sourceUrl),
+			assetCount: assets.length,
+		}, controller.signal);
+		transactionId = transaction.transactionId;
+
+		const uploadedPaths = new Array<string>(assets.length);
+		let nextIndex = 0;
+		const workerCount = Math.min(
+			FEISHU_BRIDGE_UPLOAD_CONCURRENCY,
+			assets.length
+		);
+		await Promise.all(
+			Array.from({ length: workerCount }, async () => {
+				while (!controller.signal.aborted) {
+					const index = nextIndex++;
+					const asset = assets[index];
+					if (!asset) return;
+					const downloaded = await dependencies.downloadAsset(
+						asset,
+						input.sourceUrl,
+						controller.signal
+					);
+					const uploaded = await dependencies.client.uploadAsset(
+						transactionId,
+						index,
+						{
+							...downloaded,
+							signal: controller.signal,
+						}
+					);
+					uploadedPaths[index] = uploaded.vaultPath;
+				}
+			})
+		);
+
+		let finalContent = input.fileContent;
+		assets.forEach((asset, index) => {
+			finalContent = replaceFeishuBridgeAsset(
+				finalContent,
+				asset.token,
+				uploadedPaths[index],
+				feishuBridgeMarkerKind(asset)
+			);
+		});
+
+		return await dependencies.client.commitTransaction(
+			transactionId,
+			finalContent,
+			controller.signal
+		);
+	} catch (error) {
+		controller.abort();
+		if (transactionId) {
+			const cleanupController = new AbortController();
+			const cleanupTimeout = setTimeout(
+				() => cleanupController.abort(),
+				10_000
+			);
+			await dependencies.client
+				.abortTransaction(transactionId, cleanupController.signal)
+				.catch(() => undefined);
+			clearTimeout(cleanupTimeout);
+		}
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+async function transferFeishuBridgeRequest(
+	request: Record<string, unknown>
+): Promise<FeishuBridgeCommitResponse> {
+	const settings = await loadPlatformSettings();
+	if (!isFeishuBridgeEnabled(settings.feishu)) {
+		throw new Error('飞书媒体未启用 Obsidian 配套插件');
+	}
+	if (!settings.feishu.bridgePairingToken) {
+		throw new Error('尚未配置 Obsidian 配套插件配对令牌');
+	}
+
+	const input = request.input as FeishuBridgeTransferInput | undefined;
+	if (
+		!input ||
+		typeof input.fileContent !== 'string' ||
+		typeof input.notePath !== 'string' ||
+		typeof input.sourceUrl !== 'string' ||
+		typeof input.vault !== 'string' ||
+		!['create', 'overwrite', 'append-specific', 'prepend-specific'].includes(
+			input.behavior
+		)
+	) {
+		throw new Error('飞书桥接保存参数无效');
+	}
+
+	const client = new FeishuBridgeClient({
+		endpoint: settings.feishu.bridgeEndpoint,
+		pairingToken: settings.feishu.bridgePairingToken,
+		requestTimeoutMs: 90_000,
+	});
+	const assets = extractFeishuBridgeAssets(input.fileContent);
+	const health = await client.health();
+	const useResumable =
+		health.capabilities?.includes(FEISHU_BRIDGE_RESUMABLE_CAPABILITY) &&
+		(
+			assets.length > FEISHU_BRIDGE_RESUMABLE_ASSET_THRESHOLD ||
+			assets.some(asset => asset.kind !== 'image')
+		);
+	if (useResumable) {
+		return transferFeishuNoteWithResumableBridge(input, { client });
+	}
+	return transferFeishuNoteWithBridge(input, {
+		client,
+		downloadAsset: downloadFeishuBridgeAsset,
+	});
+}
+
+async function getFeishuBridgeProgress(
+	sourceUrl: string
+): Promise<Awaited<ReturnType<typeof loadFeishuBridgeProgress>>> {
+	const stored = await loadFeishuBridgeProgress(sourceUrl);
+	if (!stored) return null;
+	const settings = await loadPlatformSettings();
+	if (!settings.feishu.bridgePairingToken) return stored;
+	const client = new FeishuBridgeClient({
+		endpoint: settings.feishu.bridgeEndpoint,
+		pairingToken: settings.feishu.bridgePairingToken,
+	});
+	try {
+		const status = await client.getSessionStatus(stored.sessionId);
+		return await saveFeishuBridgeProgress(sourceUrl, status);
+	} catch (error) {
+		if (
+			error instanceof FeishuBridgeRequestError &&
+			(error.status === 404 || error.code === 'session_not_found')
+		) {
+			await clearFeishuBridgeProgress(sourceUrl);
+			return null;
+		}
+		return stored;
+	}
+}
+
+async function testFeishuBridgeConnection(): Promise<FeishuBridgeHealthResponse> {
+	const settings = await loadPlatformSettings();
+	if (!settings.feishu.bridgePairingToken) {
+		throw new Error('尚未配置 Obsidian 配套插件配对令牌');
+	}
+	const client = new FeishuBridgeClient({
+		endpoint: settings.feishu.bridgeEndpoint,
+		pairingToken: settings.feishu.bridgePairingToken,
+	});
+	return client.health();
 }
 
 export function registerFeishuBackgroundHandlers(): PlatformBackgroundHandler[] {
 	return [({ request, sender, sendResponse }) => {
-		if (request.action !== 'fetchFeishuApi' && request.action !== 'fetchFeishuMedia') {
+		if (
+			request.action !== 'fetchFeishuApi'
+			&& request.action !== 'fetchFeishuMedia'
+			&& request.action !== 'cancelFeishuMedia'
+			&& request.action !== 'saveFeishuWithBridge'
+			&& request.action !== 'testFeishuBridge'
+			&& request.action !== 'getFeishuBridgeProgress'
+		) {
 			return undefined;
-		}
-
-		if (!request.url) {
-			sendResponse({ success: false, error: 'Missing Feishu URL' });
-			return true;
 		}
 
 		if (!isAllowedFeishuSender(sender)) {
 			sendResponse({ success: false, error: 'Blocked Feishu sender' });
+			return true;
+		}
+
+		if (request.action === 'saveFeishuWithBridge') {
+			transferFeishuBridgeRequest(request).then(result => {
+				sendResponse({ success: true, data: result });
+			}).catch(error => {
+				sendResponse({
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+			return true;
+		}
+
+		if (request.action === 'getFeishuBridgeProgress') {
+			if (typeof request.sourceUrl !== 'string') {
+				sendResponse({ success: false, error: '飞书进度查询参数无效' });
+				return true;
+			}
+			getFeishuBridgeProgress(request.sourceUrl).then(progress => {
+				sendResponse({ success: true, data: progress });
+			}).catch(error => {
+				sendResponse({
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+			return true;
+		}
+
+		if (request.action === 'testFeishuBridge') {
+			testFeishuBridgeConnection().then(result => {
+				sendResponse({ success: true, data: result });
+			}).catch(error => {
+				sendResponse({
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+			return true;
+		}
+
+		if (request.action === 'cancelFeishuMedia') {
+			const requestId = typeof request.requestId === 'string' ? request.requestId : '';
+			if (requestId) {
+				activeFeishuMediaRequests.get(requestId)?.abort();
+			}
+			sendResponse({ success: true });
+			return true;
+		}
+
+		if (!request.url) {
+			sendResponse({ success: false, error: 'Missing Feishu URL' });
 			return true;
 		}
 
@@ -171,14 +1219,38 @@ export function registerFeishuBackgroundHandlers(): PlatformBackgroundHandler[] 
 			return true;
 		}
 
-		const maxBytes = request.maxBytes as number | undefined;
-		fetchFeishuMedia(request.url, maxBytes).then((data) => {
+		const requestId = typeof request.requestId === 'string' && request.requestId.length <= 128
+			? request.requestId
+			: crypto.randomUUID();
+		const maxBytes = normalizePositiveInteger(
+			request.maxBytes,
+			MAX_FEISHU_MEDIA_RESPONSE_BYTES,
+			MAX_FEISHU_MEDIA_RESPONSE_BYTES
+		);
+		const timeoutMs = normalizePositiveInteger(
+			request.timeoutMs,
+			DEFAULT_FEISHU_MEDIA_TIMEOUT_MS,
+			MAX_FEISHU_MEDIA_TIMEOUT_MS
+		);
+		activeFeishuMediaRequests.get(requestId)?.abort();
+		const controller = new AbortController();
+		activeFeishuMediaRequests.set(requestId, controller);
+		const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+		fetchFeishuMedia(request.url, maxBytes, controller.signal).then((data) => {
 			sendResponse({ success: true, data });
 		}).catch((error) => {
 			sendResponse({
 				success: false,
-				error: error instanceof Error ? error.message : String(error)
+				error: controller.signal.aborted
+					? 'Feishu media request cancelled or timed out'
+					: error instanceof Error ? error.message : String(error)
 			});
+		}).finally(() => {
+			clearTimeout(timeoutId);
+			if (activeFeishuMediaRequests.get(requestId) === controller) {
+				activeFeishuMediaRequests.delete(requestId);
+			}
 		});
 		return true;
 	}];

@@ -1,4 +1,4 @@
-name: Sync official version
+name: Check official version
 
 on:
   workflow_dispatch:
@@ -6,10 +6,10 @@ on:
     - cron: "17 2 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  sync-version:
+  check-version:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,17 +18,5 @@ jobs:
         with:
           node-version: 22
 
-      - name: Sync version from official Obsidian Web Clipper
-        run: npm run sync:official-version -- --required
-
-      - name: Commit version update
-        run: |
-          if git diff --quiet -- package.json package-lock.json src/manifest.chrome.json src/manifest.firefox.json src/manifest.safari.json; then
-            echo "Version already aligned."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json src/manifest.chrome.json src/manifest.firefox.json src/manifest.safari.json
-          git commit -m "chore: sync official version"
-          git push
+      - name: Check for a new official Obsidian Web Clipper release
+        run: npm run sync:official-version -- --required --check

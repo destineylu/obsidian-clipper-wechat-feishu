@@ -131,5 +131,5 @@ After merging an upstream release:
 1. Re-check the hook calls listed above.
 2. Keep upstream changes in core files unless a platform hook must be restored.
 3. Run `npm run check:custom-platforms`.
-4. Run `npx tsc --noEmit --module esnext` and the full test suite.
+4. Run `npm run check` for sensitive artifacts, platform hooks, type checking, and the full test suite.
 5. Build Chrome, Firefox, and Safari.

@@ -24,3 +24,5 @@ assets/shared
 .cursorrules
 .env
 context/
+.playwright-mcp/
+.e2e-vault/

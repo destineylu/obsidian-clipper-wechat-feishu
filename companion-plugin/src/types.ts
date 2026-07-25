@@ -1,0 +1,49 @@
+import type {
+	FeishuBridgeCommitResponse,
+	FeishuBridgeCreateTransactionRequest,
+	FeishuBridgeUploadAssetResponse,
+} from '../../src/platforms/feishu/bridge-protocol';
+
+export interface BridgePluginSettings {
+	settingsVersion: number;
+	port: number;
+	pairingTokenHash: string;
+	attachmentFolder: string;
+	maxAssetBytes: number;
+	maxTransactionBytes: number;
+	imageMaxBytes: number;
+	fileMaxBytes: number;
+	sessionMaxBytes: number;
+	sessionRetentionMs: number;
+	downloadConcurrency: number;
+}
+
+export interface StagedAsset extends FeishuBridgeUploadAssetResponse {
+	tempPath: string;
+	filename: string;
+	contentType: string;
+}
+
+export interface BridgeTransaction {
+	id: string;
+	expiresAt: Date;
+	request: FeishuBridgeCreateTransactionRequest;
+	tempDirectory: string;
+	assets: Map<number, StagedAsset>;
+	totalBytes: number;
+	reservedBytes: number;
+	activeAssetIndexes: Set<number>;
+}
+
+export interface BridgeTransactionWriter {
+	reserveAssetPath(
+		transactionId: string,
+		index: number,
+		filename: string
+	): string;
+	commit(
+		transaction: BridgeTransaction,
+		content: string
+	): Promise<FeishuBridgeCommitResponse>;
+	release(transactionId: string): void;
+}

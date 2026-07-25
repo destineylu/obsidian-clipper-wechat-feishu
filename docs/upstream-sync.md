@@ -6,7 +6,8 @@ This fork is based on the official Obsidian Web Clipper, but keeps Chinese platf
 
 - `main`: stable release branch for this fork.
 - `upstream/main`: official `obsidianmd/obsidian-clipper` branch.
-- `sync-upstream-YYYYMMDD`: temporary branch for each official merge.
+- `official-snapshot`: linear, tree-exact snapshots of official source.
+- `codex/sync-upstream-YYYYMMDD`: temporary branch for each official merge.
 
 Recommended remotes:
 
@@ -35,62 +36,89 @@ The lower-level utility files under `src/utils/*-extractor.ts` can stay as imple
 
 ## Sync workflow
 
-1. Save the current fork state:
+1. Verify the current fork state without changing its version:
 
-```bash
-npm run sync:official-version
+```powershell
 git status --short
-npm run build:chrome
-npm run check:custom-platforms
+npm run check
+npm run build
 ```
 
-2. Fetch official changes:
+2. Preserve the current official baseline before the first real upstream fetch:
 
-```bash
+```powershell
+git branch official-snapshot eae51b9e9d5ea4353ffcf61dd83fd2708afdbed4
+```
+
+This repository used a synthetic, tree-exact official `1.7.1` snapshot after a Windows TLS failure. Do not directly merge the unrelated real `upstream/main` history, because that would replay the full official delta.
+
+3. Fetch official changes and create the next tree-exact snapshot:
+
+```powershell
 git fetch upstream
-git checkout -b sync-upstream-YYYYMMDD main
-git merge upstream/main
+$previousSnapshot = git rev-parse official-snapshot
+$officialTree = git rev-parse 'upstream/main^{tree}'
+$version = (git show upstream/main:package.json | Out-String | ConvertFrom-Json).version
+$newSnapshot = git commit-tree $officialTree -p $previousSnapshot -m "chore: snapshot official upstream $version"
+git update-ref refs/heads/official-snapshot $newSnapshot $previousSnapshot
+
+git switch main
+git switch -c "codex/sync-upstream-$((Get-Date).ToString('yyyyMMdd'))"
+git merge official-snapshot
 ```
 
-3. Resolve conflicts conservatively:
+4. Resolve conflicts conservatively:
 
 - Prefer official changes in generic UI, template, settings, Reader Mode, build config, and shared utilities.
 - Preserve the imports from `src/platforms/*` in the official-like core files.
 - Keep Feishu settings fields and media policy defaults unless the product decision changes.
 - Keep README sections that explain this fork's Feishu and WeChat behavior.
 
-4. Verify:
+5. Align the checked-in version only after the source merge:
 
-```bash
-npm run check:custom-platforms
-npm run build:chrome
-npm run test
+```powershell
+$env:OFFICIAL_CLIPPER_VERSION = $version
+npm run sync:official-version
+Remove-Item Env:OFFICIAL_CLIPPER_VERSION
 ```
 
-5. Manual regression checklist:
+6. Verify:
+
+```powershell
+npm run check
+npm run build
+npm audit --omit=dev --audit-level=low
+git diff --check
+```
+
+The normal build is offline and must not modify package or manifest versions.
+
+7. Manual regression checklist:
 
 - Feishu `/docx/` document with text, headings, lists, tables, and images.
 - Feishu `/wiki/` document.
-- Feishu image-heavy document with "Download images" off: should save links and remain fast.
-- Feishu image-heavy document with "Download images" on: should show warning when image count is high.
+- Feishu image-heavy document with local companion images and linked videos/files.
+- Feishu mixed-media document with linked images and local companion videos/files.
+- Feishu mixed-media document with both controls local: should resume interrupted downloads.
+- Feishu lightweight configuration with both controls linked: should not invoke the companion.
 - WeChat article with many lazy-loaded images.
 - WeChat article with video: should keep cover/original article playback link rather than a temporary mp4 URL.
 - Bilibili Reader Mode transcript, timestamps, and playback tracking.
 
-6. Merge back:
+8. Merge back:
 
-```bash
+```powershell
 git checkout main
-git merge sync-upstream-YYYYMMDD
+git merge "codex/sync-upstream-$((Get-Date).ToString('yyyyMMdd'))"
 git push wechat-feishu main
 ```
 
 ## Guardrail
 
-Run this after every upstream merge:
+Run the full guardrail after every upstream merge:
 
-```bash
-npm run check:custom-platforms
+```powershell
+npm run check
 ```
 
 The check fails if official-like files bypass `src/platforms/*` and import Feishu/Bilibili extractors directly again. This keeps future merges easier to review.
@@ -99,19 +127,23 @@ The check fails if official-like files bypass `src/platforms/*` and import Feish
 
 This fork intentionally keeps `package.json` and all browser manifest versions aligned with the official released Obsidian Web Clipper version. Do not bump this fork independently.
 
-- Local builds run `scripts/sync-official-version.mjs` before browser builds.
-- By default, the sync script reads the official Chrome Web Store update metadata for extension ID `cnjifjpddelmedmihgijeibhnjfabmlf`, which tracks the version users actually install.
-- GitHub Actions runs `.github/workflows/sync-official-version.yml` daily and commits a version-only update when the official released version changes.
-- If the official version source is unreachable during a local build, the script keeps the current checked-in version so development can continue.
+- Browser builds use the checked-in version and do not access the network or modify source files.
+- The sync script reads official release metadata only when explicitly invoked.
+- GitHub Actions checks daily for a new official release and fails visibly; it never changes version numbers without the corresponding source update.
+- A version bump must be committed in the same reviewed change as the matching official source sync.
 
 Manual override for emergency releases:
 
-```bash
-OFFICIAL_CLIPPER_VERSION=1.7.1 npm run sync:official-version
+```powershell
+$env:OFFICIAL_CLIPPER_VERSION = '1.7.1'
+npm run sync:official-version
+Remove-Item Env:OFFICIAL_CLIPPER_VERSION
 ```
 
 To intentionally follow the official GitHub `main` branch instead of the released browser extension:
 
-```bash
-OFFICIAL_CLIPPER_VERSION_SOURCE=github-main npm run sync:official-version
+```powershell
+$env:OFFICIAL_CLIPPER_VERSION_SOURCE = 'github-main'
+npm run sync:official-version
+Remove-Item Env:OFFICIAL_CLIPPER_VERSION_SOURCE
 ```

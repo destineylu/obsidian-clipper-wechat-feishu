@@ -641,6 +641,24 @@
 	"processing": {
 		"message": "处理中"
 	},
+	"feishuBridgePreparing": {
+		"message": "正在准备飞书附件"
+	},
+	"feishuBridgeDownloading": {
+		"message": "正在下载飞书附件"
+	},
+	"feishuBridgeCommitting": {
+		"message": "正在写入 Obsidian 附件和笔记"
+	},
+	"feishuBridgeCompleted": {
+		"message": "已保存到 Obsidian"
+	},
+	"feishuBridgeFailed": {
+		"message": "部分飞书附件下载失败"
+	},
+	"feishuBridgeRetryHint": {
+		"message": "再次点击“添加到 Obsidian”即可继续"
+	},
 	"properties": {
 		"message": "属性"
 	},

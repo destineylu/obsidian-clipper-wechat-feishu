@@ -18,7 +18,12 @@ import { getClipHistory } from '../utils/storage-utils';
 import dayjs from 'dayjs';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
 import { showModal, hideModal } from '../utils/modal-utils';
-import { loadPlatformSettings, savePlatformSettings } from '../platforms/settings';
+import {
+	loadPlatformSettings,
+	savePlatformSettings,
+	type FeishuAttachmentMode,
+	type FeishuImageMode,
+} from '../platforms/settings';
 
 dayjs.extend(weekOfYear);
 
@@ -229,7 +234,7 @@ export function initializeGeneralSettings(): void {
 		initializeExportHighlightsButton();
 		initializeSaveBehaviorDropdown();
 		initializeFeishuSettings();
-		initializeFeishuDownloadImagesToggle();
+		initializeFeishuImageSettings();
 		await initializeUsageChart();
 
 		// Initialize feedback modal close button
@@ -347,17 +352,87 @@ function initializeSilentOpenToggle(): void {
 	});
 }
 
-function initializeFeishuDownloadImagesToggle(): void {
-	loadPlatformSettings().then((platformSettings) => {
-		initializeSettingToggle('feishu-download-images-toggle', platformSettings.feishu.downloadImages, (checked) => {
-			savePlatformSettings({
-				feishu: {
-					...platformSettings.feishu,
-					downloadImages: checked,
-				},
-			});
+async function initializeFeishuImageSettings(): Promise<void> {
+	const modeSelect = document.getElementById('feishu-image-mode') as HTMLSelectElement;
+	const attachmentModeSelect = document.getElementById('feishu-attachment-mode') as HTMLSelectElement;
+	const bridgeSettings = document.getElementById('feishu-bridge-settings') as HTMLElement;
+	const endpointInput = document.getElementById('feishu-bridge-endpoint') as HTMLInputElement;
+	const tokenInput = document.getElementById('feishu-bridge-token') as HTMLInputElement;
+	const testButton = document.getElementById('feishu-bridge-test') as HTMLButtonElement;
+	const status = document.getElementById('feishu-bridge-status') as HTMLElement;
+	if (
+		!modeSelect ||
+		!attachmentModeSelect ||
+		!bridgeSettings ||
+		!endpointInput ||
+		!tokenInput ||
+		!testButton ||
+		!status
+	) {
+		return;
+	}
+
+	let platformSettings = await loadPlatformSettings();
+	modeSelect.value = platformSettings.feishu.imageMode;
+	attachmentModeSelect.value = platformSettings.feishu.attachmentMode;
+	endpointInput.value = platformSettings.feishu.bridgeEndpoint;
+	tokenInput.value = platformSettings.feishu.bridgePairingToken;
+
+	const updateVisibility = () => {
+		bridgeSettings.style.display =
+			modeSelect.value === 'obsidian-bridge'
+				|| attachmentModeSelect.value === 'obsidian-bridge'
+				? ''
+				: 'none';
+	};
+	const persistNow = async () => {
+		platformSettings = await savePlatformSettings({
+			feishu: {
+				...platformSettings.feishu,
+				imageMode: modeSelect.value as FeishuImageMode,
+				attachmentMode: attachmentModeSelect.value as FeishuAttachmentMode,
+				downloadImages: modeSelect.value === 'inline-base64',
+				bridgeEndpoint: endpointInput.value.trim(),
+				bridgePairingToken: tokenInput.value.trim(),
+			},
 		});
+	};
+	const persist = debounce(() => void persistNow(), 300);
+
+	modeSelect.addEventListener('change', () => {
+		updateVisibility();
+		void persist();
 	});
+	attachmentModeSelect.addEventListener('change', () => {
+		updateVisibility();
+		void persist();
+	});
+	endpointInput.addEventListener('input', () => void persist());
+	tokenInput.addEventListener('input', () => void persist());
+	testButton.addEventListener('click', async () => {
+		status.textContent = '正在连接…';
+		testButton.disabled = true;
+		try {
+			await persistNow();
+			const response = await browser.runtime.sendMessage({
+				action: 'testFeishuBridge',
+			}) as {
+				success?: boolean;
+				data?: { vaultName?: string };
+				error?: string;
+			};
+			status.textContent = response?.success
+				? `连接成功${response.data?.vaultName ? `：${response.data.vaultName}` : ''}`
+				: `连接失败：${response?.error || '未知错误'}`;
+		} catch (error) {
+			status.textContent = `连接失败：${
+				error instanceof Error ? error.message : String(error)
+			}`;
+		} finally {
+			testButton.disabled = false;
+		}
+	});
+	updateVisibility();
 }
 
 function initializeOpenBehaviorDropdown(): void {

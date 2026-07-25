@@ -756,6 +756,32 @@ function buildXVideoPosterFallback(imageUrl: string, pageUrl: string): string {
 	].join('');
 }
 
+function buildXOriginalPostVideoFallback(
+	pageUrl: string,
+	posterUrl = ''
+): string {
+	if (posterUrl) return buildXVideoPosterFallback(posterUrl, pageUrl);
+	return [
+		'<section data-obsidian-clipper-x-video="true">',
+		'<h2>X 视频</h2>',
+		`<p><a href="${escapeHtml(pageUrl)}">X视频：打开原文播放</a></p>`,
+		'</section>',
+	].join('');
+}
+
+function getXVideoFallbackPoster(doc: Document, pageUrl: string): string {
+	const article = getXTargetArticle(doc, pageUrl);
+	if (!article) return '';
+	const videoPoster = Array.from(
+		article.querySelectorAll<HTMLVideoElement>('video[poster]')
+	)
+		.map(video => normalizeXMediaImageUrl(video.poster || ''))
+		.find(Boolean);
+	if (videoPoster) return videoPoster;
+
+	return extractXMediaImagesFromElement(article).find(isXVideoThumbnailUrl) || '';
+}
+
 function buildXMediaLink(mediaUrl: string): string {
 	return `<p><a href="${escapeHtml(mediaUrl)}">X媒体：打开原文媒体</a></p>`;
 }
@@ -1086,10 +1112,19 @@ export async function appendXVideoFallback(content: string, pageUrl: string, doc
 		nextContent = insertXVideoSectionNearTweetMedia(nextContent, buildXVideoSection(threadCandidate), threadUrl);
 	}
 
-	if (nextContent !== content) {
-		console.log('[X Clipper] Added video fallback:', {
+	if (
+		hasVideoMedia &&
+		!nextContent.includes('data-obsidian-clipper-x-video')
+	) {
+		const fallback = buildXOriginalPostVideoFallback(
 			pageUrl,
-		});
+			doc ? getXVideoFallbackPoster(doc, pageUrl) : ''
+		);
+		nextContent = insertXVideoSectionNearTweetMedia(
+			nextContent,
+			fallback,
+			pageUrl
+		);
 	}
 
 	return nextContent;

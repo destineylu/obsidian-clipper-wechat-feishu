@@ -22,29 +22,47 @@ The official version extracts Feishu document content via generic DOM parsing, w
 - **Complete content** — Retrieves all document blocks including text, headings, lists, code blocks, tables, quotes, and more
 - **Wiki support** — Works with both Feishu Wiki (`/wiki/`) and regular document (`/docx/`) URLs
 - **Structure preserved** — Maintains the original document hierarchy, converted to standard HTML for Obsidian Clipper to process
-- **Media protection** — Feishu images are not inlined by default; the note keeps clickable links so Obsidian opens quickly
-- **Manual image download** — Turn on "Download images" only when you need a complete image-heavy note; the extension warns when image counts are high
-- **Video/file fallback links** — Videos and attachments that cannot be reliably inlined are kept as accessible links instead of broken placeholders
+- **Independent media policies** — Image storage and video/large-file storage are configured separately
+- **Binary Vault attachments** — A Desktop companion writes large image sets to the Vault without Base64 Markdown
+- **Resumable large-media downloads** — Local videos and files can continue without keeping the popup open
+- **Portable link fallback** — Media that is not downloaded keeps an original Feishu document entry instead of an unusable temporary URL
 
-#### How to choose the Feishu "Download images" setting
+#### How to choose Feishu media storage
 
-The extension provides a **Feishu / Lark → Download images** toggle in settings. It is off by default. Recommended usage:
+Open **Settings → General → Feishu / Lark** and configure the two independent controls:
 
-- **Keep it off by default**: Best for most Feishu documents, especially screenshot-heavy tutorials. Images are saved as links, keeping Markdown lightweight and Obsidian fast.
-- **Turn it on manually**: Use only when you need a complete offline copy of a document with images, such as a small document that needs formal archiving.
-- **Be careful with large documents**: Feishu images are not ordinary public image URLs like WeChat article images. They must be fetched through the Feishu API and converted into accessible media content. With many images, note size and Obsidian rendering cost increase quickly.
-- **Risk threshold**: Around 30 images can become noticeably slow; 50 or more may make the note impossible to open in Obsidian. If this happens, turn off "Download images" and clip again as image links.
+| Setting | Options | Recommendation |
+| --- | --- | --- |
+| Image storage | Original links / Obsidian companion / Legacy Base64 | Use the companion for image-heavy documents; use Base64 only for small legacy workflows |
+| Videos and large files | Keep Feishu links / Download to Obsidian | Keep links by default; download only for a deliberate offline archive |
+
+Recommended combinations:
+
+- **Image-heavy document with large videos**: local companion images plus linked videos/files.
+- **Complete offline archive**: local companion storage for both controls; check disk capacity first.
+- **Lightweight clipping**: keep both controls as links; the companion is not required.
+- **Legacy compatibility**: Base64 images plus linked videos/files.
 
 WeChat Official Account images are usually saved as remote `mmbiz.qpic.cn` links and loaded on demand by Obsidian. Feishu images require authenticated fetching and conversion, so large image-heavy documents behave differently.
 
 **Setup:**
 
 1. Go to [Feishu Open Platform](https://open.feishu.cn/app) and create a custom app
-2. Grant the app these permissions: `docx:document:readonly`, `wiki:node:read`
+2. Grant the app these application-identity permissions: `docx:document:readonly`, `docs:document.media:download`, `wiki:node:read`
 3. Get the App ID and App Secret (see [official docs: Get access token](https://open.feishu.cn/document/server-docs/api-call-guide/calling-process/get-access-token#63c75bdc))
 4. Open Obsidian Web Clipper → click **Settings** (top-right) → **General** → find the **Feishu / Lark** section → enter your App ID and App Secret
+5. To save binary media into a Vault, install and enable `Clipper Attachment Bridge`, enter its endpoint and pairing token, and run **Test connection**
 
-> **Privacy note**: App ID and App Secret are stored only in your local browser storage (`browser.storage.local`) and are never sent to any third-party server.
+> **Privacy note**: App ID and App Secret are stored in local extension storage (`browser.storage.local`). They are sent over HTTPS only to the official Feishu/Lark authentication API to obtain a tenant token, and are not sent to a server operated by this project.
+
+**Companion installation summary:**
+
+1. Run `npm run build:companion` from the repository root, not from the `companion-plugin` subdirectory.
+2. Copy `main.js`, `manifest.json`, and `styles.css` from `companion-plugin/dist` directly into `<active-vault>/.obsidian/plugins/clipper-attachment-bridge/`.
+3. Reload third-party plugins in Obsidian and enable `Clipper Attachment Bridge`. It is manually installed and is not listed in the Community Plugins store.
+4. Copy its pairing token, enter `http://127.0.0.1:27125` and the token in Web Clipper, then run **Test connection**.
+
+See the [Feishu media storage guide](./docs/feishu-media-storage.md) for complete companion installation, migration behavior, and troubleshooting.
 
 ### WeChat Official Account article extraction
 

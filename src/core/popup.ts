@@ -23,6 +23,9 @@ import { sanitizeFileName } from '../utils/string-utils';
 import { saveFile } from '../utils/file-utils';
 import { translatePage, getMessage, setupLanguageAndDirection } from '../utils/i18n';
 import { formatPropertyValue } from '../utils/shared';
+import { platformRegistry } from '../platforms';
+import { createSingleFlight } from '../utils/single-flight';
+import { isFeishuBridgeSessionActive } from '../platforms/feishu/bridge-progress';
 
 interface ReaderModeResponse {
 	success: boolean;
@@ -36,11 +39,163 @@ let currentVariables: { [key: string]: string } = {};
 let currentTabId: number | undefined;
 let lastSelectedVault: string | null = null;
 let largeNoteContentValue: string | null = null;
+let isClipObsidianBusy = false;
+let isClipObsidianSaved = false;
+let isClipObsidianRequestActive = false;
+let lastFeishuBridgeProgress: FeishuBridgeProgress | null = null;
+let pageRefreshGeneration = 0;
+let preparedPageContext: { tabId: number; url: string; identity: string } | null =
+	null;
 
 const isSidePanel = window.location.pathname.includes('side-panel.html');
 const urlParams = new URLSearchParams(window.location.search);
 const isIframe = urlParams.get('context') === 'iframe';
 const LARGE_NOTE_CONTENT_PREVIEW_THRESHOLD = 2_000_000;
+
+type FeishuBridgeProgressPhase =
+	| 'waiting'
+	| 'downloading'
+	| 'ready'
+	| 'committing'
+	| 'completed'
+	| 'failed';
+
+interface FeishuBridgeProgress {
+	sessionId: string;
+	phase: FeishuBridgeProgressPhase;
+	assetCount: number;
+	completedAssets: number;
+	failedAssets: number;
+	downloadedBytes: number;
+	totalBytes?: number;
+	notePath?: string;
+	error?: string;
+	updatedAt: string;
+}
+
+function formatBridgeBytes(bytes: number): string {
+	if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	const unitIndex = Math.min(
+		Math.floor(Math.log(bytes) / Math.log(1024)),
+		units.length - 1
+	);
+	const value = bytes / 1024 ** unitIndex;
+	return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function pageIdentity(rawUrl: string): string {
+	try {
+		const url = new URL(rawUrl);
+		url.hash = '';
+		return url.toString();
+	} catch {
+		return rawUrl;
+	}
+}
+
+function clearFeishuBridgeProgressForPageChange(): void {
+	lastFeishuBridgeProgress = null;
+	const container = document.getElementById('feishu-bridge-progress');
+	if (container) container.hidden = true;
+	isClipObsidianBusy = false;
+	isClipObsidianSaved = false;
+	determineMainAction();
+}
+
+function renderFeishuBridgeProgress(progress: FeishuBridgeProgress): void {
+	const container = document.getElementById('feishu-bridge-progress');
+	const label = document.getElementById('feishu-bridge-progress-label');
+	const count = document.getElementById('feishu-bridge-progress-count');
+	const bar = document.getElementById('feishu-bridge-progress-bar') as HTMLProgressElement | null;
+	const detail = document.getElementById('feishu-bridge-progress-detail');
+	if (!container || !label || !count || !bar || !detail) return;
+
+	lastFeishuBridgeProgress = progress;
+	container.hidden = false;
+	container.classList.toggle('is-failed', progress.phase === 'failed');
+	container.classList.toggle('is-completed', progress.phase === 'completed');
+
+	const assetCount = Math.max(0, progress.assetCount);
+	const completedAssets = Math.min(
+		Math.max(0, progress.completedAssets),
+		assetCount
+	);
+	bar.max = Math.max(1, assetCount);
+	bar.value = progress.phase === 'completed'
+		? Math.max(1, assetCount)
+		: completedAssets;
+	count.textContent = assetCount
+		? `${new Intl.NumberFormat().format(completedAssets)} / ${new Intl.NumberFormat().format(assetCount)}`
+		: '';
+
+	switch (progress.phase) {
+		case 'waiting':
+			label.textContent = getMessage('feishuBridgePreparing');
+			break;
+		case 'downloading':
+			label.textContent = getMessage('feishuBridgeDownloading');
+			break;
+		case 'ready':
+		case 'committing':
+			label.textContent = getMessage('feishuBridgeCommitting');
+			break;
+		case 'completed':
+			label.textContent = getMessage('feishuBridgeCompleted');
+			break;
+		case 'failed':
+			label.textContent = getMessage('feishuBridgeFailed');
+			break;
+	}
+
+	const byteSummary = progress.totalBytes && progress.totalBytes > 0
+		? `${formatBridgeBytes(progress.downloadedBytes)} / ${formatBridgeBytes(progress.totalBytes)}`
+		: formatBridgeBytes(progress.downloadedBytes);
+	if (progress.phase === 'failed') {
+		detail.textContent = progress.error
+			? `${progress.error} · ${getMessage('feishuBridgeRetryHint')}`
+			: getMessage('feishuBridgeRetryHint');
+	} else if (progress.phase === 'waiting') {
+		detail.textContent = byteSummary
+			? `${byteSummary} · ${getMessage('feishuBridgeRetryHint')}`
+			: getMessage('feishuBridgeRetryHint');
+	} else if (progress.phase === 'completed') {
+		detail.textContent = progress.notePath || byteSummary;
+	} else {
+		detail.textContent = byteSummary;
+	}
+
+	if (progress.phase === 'completed') {
+		isClipObsidianBusy = false;
+		isClipObsidianSaved = true;
+		determineMainAction();
+	} else if (
+		progress.phase === 'failed' ||
+		!isFeishuBridgeSessionActive(progress.phase)
+	) {
+		isClipObsidianBusy = false;
+		isClipObsidianSaved = false;
+		determineMainAction();
+	} else {
+		isClipObsidianBusy = true;
+		isClipObsidianSaved = false;
+		determineMainAction();
+	}
+}
+
+async function restoreFeishuBridgeProgress(sourceUrl: string): Promise<void> {
+	try {
+		const response = await browser.runtime.sendMessage({
+			action: 'getFeishuBridgeProgress',
+			sourceUrl,
+		}) as { success?: boolean; data?: FeishuBridgeProgress | null };
+		if (response?.success && response.data) {
+			renderFeishuBridgeProgress(response.data);
+		}
+	} catch {
+		// Non-Feishu pages and older background builds do not expose this action.
+	}
+}
 
 function hashString(value: string): string {
 	let hash = 5381;
@@ -107,6 +262,7 @@ function createLargeContentPreview(content: string): string {
 }
 
 function setNoteContentFieldValue(noteContentField: HTMLTextAreaElement, content: string): void {
+	isClipObsidianSaved = false;
 	if (shouldUseLargeContentPreview(content)) {
 		largeNoteContentValue = content;
 		noteContentField.dataset.largeContentPreview = 'true';
@@ -341,18 +497,44 @@ function setupMessageListeners() {
 		} else if (request.action === "tabUrlChanged") {
 			if (request.tabId === currentTabId) {
 				if (currentTabId !== undefined) {
-					refreshFields(currentTabId);
+					preparedPageContext = null;
+					pageRefreshGeneration += 1;
+					clearFeishuBridgeProgressForPageChange();
+					const tabId = currentTabId;
+					void refreshFields(tabId).then(async () => {
+						if (
+							preparedPageContext?.tabId === tabId &&
+							currentTabId === tabId
+						) {
+							await restoreFeishuBridgeProgress(
+								preparedPageContext.url
+							);
+						}
+					});
 				}
 			}
 		} else if (request.action === "activeTabChanged") {
 			// Only handle active tab changes if we're in side panel mode, not iframe mode
 			if (!isIframe) {
 				currentTabId = request.tabId;
+				preparedPageContext = null;
+				pageRefreshGeneration += 1;
+				clearFeishuBridgeProgressForPageChange();
 				if (request.isRestrictedUrl) {
 					showError('pageCannotBeClipped');
 				} else if (request.isValidUrl) {
 					if (currentTabId !== undefined) {
-						refreshFields(currentTabId); // Force template check when URL changes
+						const tabId = currentTabId;
+						void refreshFields(tabId).then(async () => {
+							if (
+								preparedPageContext?.tabId === tabId &&
+								currentTabId === tabId
+							) {
+								await restoreFeishuBridgeProgress(
+									preparedPageContext.url
+								);
+							}
+						}); // Force template check when URL changes
 					}
 				} else if (request.isBlankPage) {
 					showError('pageCannotBeClipped');
@@ -364,6 +546,8 @@ function setupMessageListeners() {
 			// This message is now handled by checkHighlighterModeState
 		} else if (request.action === "highlighterModeChanged") {
 			// This message is now handled by checkHighlighterModeState
+		} else if (request.action === 'feishuBridgeProgress' && request.progress) {
+			renderFeishuBridgeProgress(request.progress as FeishuBridgeProgress);
 		}
 	});
 }
@@ -480,6 +664,14 @@ document.addEventListener('DOMContentLoaded', async function() {
 
 				// Initial content load
 				await refreshFields(currentTabId);
+				if (
+					preparedPageContext?.tabId === currentTabId &&
+					pageIdentity(tab.url) === preparedPageContext.identity
+				) {
+					await restoreFeishuBridgeProgress(
+						preparedPageContext.url
+					);
+				}
 			} catch (error) {
 				console.error('Error initializing popup:', error);
 				showError(getMessage('pleaseReload'), { translate: false });
@@ -748,6 +940,10 @@ async function waitForInterpreter(interpretBtn: HTMLButtonElement): Promise<void
 }
 
 async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebuildSkeleton = true }: { checkTemplateTriggers?: boolean; rebuildSkeleton?: boolean } = {}) {
+	const generation = ++pageRefreshGeneration;
+	if (currentTabId === tabId) preparedPageContext = null;
+	const isCurrentRefresh = () =>
+		generation === pageRefreshGeneration && currentTabId === tabId;
 	if (templates.length === 0) {
 		console.warn('No templates available');
 		showError('noTemplates');
@@ -756,6 +952,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 
 	try {
 		const tab = await getTabInfo(tabId);
+		if (!isCurrentRefresh()) return;
 		if (!tab.url || isBlankPage(tab.url)) {
 			showError('pageCannotBeClipped');
 			return;
@@ -782,6 +979,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 			};
 
 			const matchedTemplate = await findMatchingTemplate(tab.url, getSchemaOrgData);
+			if (!isCurrentRefresh()) return;
 			if (matchedTemplate) {
 				console.log('Matched template:', matchedTemplate);
 				currentTemplate = matchedTemplate;
@@ -795,6 +993,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 		}
 
 		const extractedData = await extractionPromise;
+		if (!isCurrentRefresh()) return;
 		if (extractedData) {
 			const currentUrl = tab.url;
 
@@ -817,6 +1016,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 				extractedData.language || '',
 				extractedData.metaTags
 			);
+			if (!isCurrentRefresh()) return;
 			if (initializedContent) {
 				currentVariables = initializedContent.currentVariables;
 				console.log('Updated currentVariables:', currentVariables);
@@ -826,9 +1026,20 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 					initializedContent.currentVariables,
 					extractedData.schemaOrgData
 				);
+				if (!isCurrentRefresh()) {
+					if (currentTabId !== undefined) {
+						void refreshFields(currentTabId);
+					}
+					return;
+				}
 
 				// Update variables panel if it's open
 				updateVariablesPanel(currentTemplate, currentVariables);
+				preparedPageContext = {
+					tabId,
+					url: currentUrl,
+					identity: pageIdentity(currentUrl),
+				};
 			} else {
 				throw new Error('Unable to initialize page content.');
 			}
@@ -836,6 +1047,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 			throw new Error('Unable to extract page content.');
 		}
 	} catch (error) {
+		if (!isCurrentRefresh()) return;
 		console.error('Error refreshing fields:', error);
 		const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
 		showError(errorMessage, { translate: false });
@@ -1348,7 +1560,7 @@ async function handleSaveToDownloads() {
 		const properties = getPropertiesFromDOM();
 
 		const frontmatter = await generateFrontmatter(properties);
-		const fileContent = frontmatter + getNoteContentForSave();
+		let fileContent = frontmatter + getNoteContentForSave();
 
 		await saveFile({
 			content: fileContent,
@@ -1372,13 +1584,36 @@ async function handleSaveToDownloads() {
 }
 
 function determineMainAction() {
-	const mainButton = document.getElementById('clip-btn');
+	const mainButton = document.getElementById('clip-btn') as HTMLButtonElement | null;
+	const moreButton = document.getElementById('more-btn') as HTMLButtonElement | null;
 	const moreDropdown = document.getElementById('more-dropdown');
 	const secondaryActions = moreDropdown?.querySelector('.secondary-actions');
 	if (!mainButton || !secondaryActions) return;
 
 	// Clear existing secondary actions
 	secondaryActions.textContent = '';
+	if (isClipObsidianBusy || isClipObsidianRequestActive) {
+		mainButton.textContent = `${getMessage('processing')}…`;
+		mainButton.disabled = true;
+		mainButton.setAttribute('aria-busy', 'true');
+		if (moreButton) moreButton.disabled = true;
+		moreDropdown?.classList.remove('show');
+		return;
+	}
+
+	if (isClipObsidianSaved) {
+		mainButton.textContent = `✓ ${getMessage('pagesSaved')}`;
+		mainButton.disabled = true;
+		mainButton.removeAttribute('aria-busy');
+		if (moreButton) moreButton.disabled = false;
+		addSecondaryAction(secondaryActions, 'copyToClipboard', copyContent);
+		addSecondaryAction(secondaryActions, 'saveFile', handleSaveToDownloads);
+		return;
+	}
+
+	mainButton.disabled = false;
+	mainButton.removeAttribute('aria-busy');
+	if (moreButton) moreButton.disabled = false;
 
 	// Set up actions based on saved behavior
 	switch (loadedSettings.saveBehavior) {
@@ -1386,27 +1621,59 @@ function determineMainAction() {
 			mainButton.textContent = getMessage('copyToClipboard');
 			mainButton.onclick = () => copyContent();
 			// Add direct actions to secondary
-			addSecondaryAction(secondaryActions, 'addToObsidian', () => handleClipObsidian());
+			addSecondaryAction(secondaryActions, 'addToObsidian', triggerClipObsidianFromUi);
 			addSecondaryAction(secondaryActions, 'saveFile', handleSaveToDownloads);
 			break;
 		case 'saveFile':
 			mainButton.textContent = getMessage('saveFile');
 			mainButton.onclick = () => handleSaveToDownloads();
 			// Add direct actions to secondary
-			addSecondaryAction(secondaryActions, 'addToObsidian', () => handleClipObsidian());
+			addSecondaryAction(secondaryActions, 'addToObsidian', triggerClipObsidianFromUi);
 			addSecondaryAction(secondaryActions, 'copyToClipboard', copyContent);
 			break;
 		default: // 'addToObsidian'
 			mainButton.textContent = getMessage('addToObsidian');
-			mainButton.onclick = () => handleClipObsidian();
+			mainButton.onclick = triggerClipObsidianFromUi;
 			// Add direct actions to secondary
 			addSecondaryAction(secondaryActions, 'copyToClipboard', copyContent);
 			addSecondaryAction(secondaryActions, 'saveFile', handleSaveToDownloads);
 	}
 }
 
-async function handleClipObsidian(): Promise<void> {
-	if (!currentTemplate) return;
+function setClipObsidianBusy(busy: boolean): void {
+	if (busy) isClipObsidianSaved = false;
+	isClipObsidianBusy = busy;
+	determineMainAction();
+}
+
+function triggerClipObsidianFromUi(): void {
+	void handleClipObsidian().catch(() => undefined);
+}
+
+async function requirePreparedPageContext(): Promise<{
+	tabId: number;
+	url: string;
+	identity: string;
+}> {
+	const tabId = currentTabId;
+	if (tabId === undefined) {
+		throw new Error('当前标签页不可用，请重新打开剪藏面板');
+	}
+	const tab = await getTabInfo(tabId);
+	const identity = pageIdentity(tab.url);
+	if (
+		!preparedPageContext ||
+		preparedPageContext.tabId !== tabId ||
+		preparedPageContext.identity !== identity
+	) {
+		void refreshFields(tabId);
+		throw new Error('页面刚刚切换，剪藏内容正在刷新，请稍候后重试');
+	}
+	return { tabId, url: tab.url, identity };
+}
+
+async function performClipObsidian(): Promise<boolean> {
+	if (!currentTemplate) return false;
 
 	const vaultDropdown = document.getElementById('vault-select') as HTMLSelectElement;
 	const noteContentField = document.getElementById('note-content-field') as HTMLTextAreaElement;
@@ -1416,10 +1683,11 @@ async function handleClipObsidian(): Promise<void> {
 
 	if (!vaultDropdown || !noteContentField) {
 		showError('Some required fields are missing. Please try reloading the extension.');
-		return;
+		return false;
 	}
 
 	try {
+		const preparedAtStart = await requirePreparedPageContext();
 		// Handle interpreter if needed
 		if (generalSettings.interpreterEnabled && interpretBtn && collectPromptVariables(currentTemplate).length > 0) {
 			if (interpretBtn.classList.contains('processing')) {
@@ -1434,7 +1702,7 @@ async function handleClipObsidian(): Promise<void> {
 		const properties = getPropertiesFromDOM();
 
 		const frontmatter = await generateFrontmatter(properties);
-		const fileContent = frontmatter + getNoteContentForSave();
+		let fileContent = frontmatter + getNoteContentForSave();
 
 		// Save to Obsidian
 		const selectedVault = vaultDropdown.value || currentTemplate.vault || '';
@@ -1442,22 +1710,65 @@ async function handleClipObsidian(): Promise<void> {
 		const noteName = isDailyNote ? '' : noteNameField?.value || '';
 		const path = isDailyNote ? '' : pathField?.value || '';
 
-		await saveToObsidian(fileContent, noteName, path, selectedVault, currentTemplate.behavior);
 		const tabInfo = await getCurrentTabInfo();
+		if (
+			currentTabId !== preparedAtStart.tabId ||
+			pageIdentity(tabInfo.url) !== preparedAtStart.identity
+		) {
+			throw new Error('页面已在保存前切换，本次操作已取消，请重新确认内容');
+		}
+		const platformSave = await platformRegistry.saveToObsidian({
+			fileContent,
+			noteName,
+			path,
+			vault: selectedVault,
+			behavior: currentTemplate.behavior,
+			url: preparedAtStart.url,
+		});
+		fileContent = platformSave.fileContent ?? fileContent;
+		if (!platformSave.handled) {
+			await saveToObsidian(
+				fileContent,
+				noteName,
+				path,
+				selectedVault,
+				currentTemplate.behavior
+			);
+		}
 		await incrementStat('addToObsidian', selectedVault, path, tabInfo.url, tabInfo.title);
 
 		lastSelectedVault = selectedVault;
 		await setLocalStorage('lastSelectedVault', lastSelectedVault);
 
-		if (!isSidePanel) {
+		const keepOpenForConfirmation = platformSave.handled && !isSidePanel;
+		if (!isSidePanel && !keepOpenForConfirmation) {
 			setTimeout(() => window.close(), 500);
 		}
+		return keepOpenForConfirmation;
 	} catch (error) {
 		console.error('Error in handleClipObsidian:', error);
-		showError('failedToSaveFile');
+		if (lastFeishuBridgeProgress?.phase === 'failed') {
+			renderFeishuBridgeProgress(lastFeishuBridgeProgress);
+		} else {
+			showError(
+				error instanceof Error ? error.message : getMessage('failedToSaveFile'),
+				{ translate: false }
+			);
+		}
 		throw error;
 	}
 }
+
+const handleClipObsidian = createSingleFlight(async () => {
+	isClipObsidianRequestActive = true;
+	setClipObsidianBusy(true);
+	try {
+		isClipObsidianSaved = await performClipObsidian();
+	} finally {
+		isClipObsidianRequestActive = false;
+		setClipObsidianBusy(false);
+	}
+});
 
 function addSecondaryAction(container: Element, actionType: string, handler: () => void) {
 	const menuItem = document.createElement('div');

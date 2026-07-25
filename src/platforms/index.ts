@@ -13,6 +13,8 @@ import {
 	PlatformMarkdownContext,
 	PlatformMarkdownResult,
 	PlatformModule,
+	PlatformObsidianSaveContext,
+	PlatformObsidianSaveResult,
 	PlatformReaderCaptureContext,
 	PlatformReaderContent,
 	PlatformReaderEnhanceContext,
@@ -88,6 +90,31 @@ export const platformRegistry = {
 			};
 		}
 		return result;
+	},
+
+	async saveToObsidian(
+		context: PlatformObsidianSaveContext
+	): Promise<PlatformObsidianSaveResult> {
+		let fileContent = context.fileContent;
+		for (const platform of matchingPlatforms(context.url)) {
+			if (!platform.saveToObsidian) continue;
+			const result = await platform.saveToObsidian({
+				...context,
+				fileContent,
+			});
+			if (!result) continue;
+			fileContent = result.fileContent ?? fileContent;
+			if (result.handled) {
+				return {
+					...result,
+					fileContent,
+				};
+			}
+		}
+		return {
+			handled: false,
+			fileContent,
+		};
 	},
 
 	async extractReaderContent(context: PlatformReaderCaptureContext): Promise<PlatformReaderContent | null> {

@@ -12,6 +12,15 @@ interface BilibiliReaderState {
 	videoElement: HTMLVideoElement | null;
 }
 
+export function isTrustedBilibiliPlayerMessage(
+	event: Pick<MessageEvent, 'source' | 'origin'>,
+	playerWindow: WindowProxy | null
+): boolean {
+	return !!playerWindow
+		&& event.source === playerWindow
+		&& event.origin === 'https://player.bilibili.com';
+}
+
 export function captureBilibiliReaderState({ document }: PlatformReaderCaptureContext): BilibiliReaderState | null {
 	const urlMatch = document.URL.match(/\/video\/(BV[\w]+|av\d+)/i);
 	if (!urlMatch) return null;
@@ -209,13 +218,7 @@ function initializeBilibiliTimestamps(context: PlatformReaderEnhanceContext): vo
 
 	const onMessage = (event: MessageEvent) => {
 		if (!iframe) return;
-		const fromIframe = event.source === iframe.contentWindow;
-		let fromBilibiliOrigin = false;
-		try {
-			const eventOriginHost = new URL(event.origin).hostname;
-			fromBilibiliOrigin = eventOriginHost.endsWith('bilibili.com');
-		} catch {}
-		if (!fromIframe && !fromBilibiliOrigin) return;
+		if (!isTrustedBilibiliPlayerMessage(event, iframe.contentWindow)) return;
 		playbackTracker.handlePlayerMessage(event.data);
 	};
 	if (iframe) {
