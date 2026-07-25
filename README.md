@@ -31,12 +31,13 @@ See the [help wanted](https://github.com/obsidianmd/obsidian-clipper/issues?q=is
 
 In no particular order:
 
-- [ ] A separate icon for Web Clipper
 - [ ] Annotate highlights
 - [ ] Template directory
-- [x] Template validation
-- [x] Template logic (if/for)
-- [x] Save images locally, [added in Obsidian 1.8.0](https://obsidian.md/changelog/2024-12-18-desktop-v1.8.0/)
+- [ ] Sync settings across browsers
+- [x] A separate icon for Web Clipper (1.6.3)
+- [x] Template validation (1.1.0)
+- [x] Template logic (if/for)  (1.1.0)
+- [x] Save images locally ([Obsidian 1.8.0](https://obsidian.md/changelog/2024-12-18-desktop-v1.8.0/))
 - [x] Translate UI into more languages — help is welcomed
 
 ## Developers
@@ -102,3 +103,7 @@ npm run test:watch
 - [lz-string](https://github.com/pieroxy/lz-string) to compress templates to reduce storage space
 - [lucide](https://github.com/lucide-icons/lucide) for icons
 - [dompurify](https://github.com/cure53/DOMPurify) for sanitizing HTML
+
+## License
+
+Obsidian Web Clipper source code is open source under the MIT License. All trademarks, icons, marketing copy, and other marketing assets are excluded from that license.

@@ -1,5 +1,5 @@
 import { generalSettings, saveSettings } from './storage-utils';
-import { PromptVariable, Template, ModelConfig } from '../types/types';
+import { PromptVariable, Template, ModelConfig, Provider } from '../types/types';
 import { compileTemplate } from './template-compiler';
 import { applyFilters } from './filters';
 import { formatDuration } from './string-utils';
@@ -48,6 +48,7 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 		let requestBody: any;
 		let headers: HeadersInit = {
 			'Content-Type': 'application/json',
+			'Accept': 'application/json',
 		};
 
 		if (provider.name.toLowerCase().includes('hugging')) {
@@ -68,30 +69,75 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 				'Authorization': `Bearer ${provider.apiKey}`
 			};
 		} else if (provider.baseUrl.includes('openai.azure.com')) {
-			requestUrl = provider.baseUrl;
+			// Azure routes by deployment in the URL, not by a model field in the body
+			requestUrl = provider.baseUrl.replace('{deployment-id}', model.providerModelId);
 			requestBody = {
 				messages: [
 					{ role: 'system', content: systemContent },
 					{ role: 'user', content: `${promptContext}` },
 					{ role: 'user', content: `${JSON.stringify(promptContent)}` }
 				],
-				max_tokens: 1600,
+				max_completion_tokens: 8000,
 				stream: false
 			};
 			headers = {
 				...headers,
 				'api-key': provider.apiKey
 			};
+		} else if (provider.name.toLowerCase().includes('deepseek')) {
+			requestUrl = provider.baseUrl;
+			requestBody = {
+				model: model.providerModelId,
+				messages: [
+					{ role: 'system', content: systemContent },
+					{ role: 'user', content: `${promptContext}` },
+					{ role: 'user', content: `${JSON.stringify(promptContent)}` }
+				],
+				max_tokens: 8000,
+				thinking: {
+					type: 'disabled'
+				},
+				stream: false
+			};
+			headers = {
+				...headers,
+				'Authorization': `Bearer ${provider.apiKey}`
+			};
+		} else if (provider.baseUrl.includes('generativelanguage.googleapis.com')) {
+			// Use the native Gemini API — Google's OpenAI-compatible endpoint
+			// rejects the newer AQ-prefixed API keys
+			requestUrl = provider.baseUrl.includes('{model-id}')
+				? provider.baseUrl.replace('{model-id}', model.providerModelId)
+				: `https://generativelanguage.googleapis.com/v1beta/models/${model.providerModelId}:generateContent`;
+			requestBody = {
+				systemInstruction: { parts: [{ text: systemContent }] },
+				contents: [
+					{
+						role: 'user',
+						parts: [
+							{ text: `${promptContext}` },
+							{ text: `${JSON.stringify(promptContent)}` }
+						]
+					}
+				],
+				generationConfig: {
+					maxOutputTokens: 8000,
+					responseMimeType: 'application/json'
+				}
+			};
+			headers = {
+				...headers,
+				'X-goog-api-key': provider.apiKey
+			};
 		} else if (provider.name.toLowerCase().includes('anthropic')) {
 			requestUrl = provider.baseUrl;
 			requestBody = {
 				model: model.providerModelId,
-				max_tokens: 1600,
+				max_tokens: 8000,
 				messages: [
 					{ role: 'user', content: `${promptContext}` },
 					{ role: 'user', content: `${JSON.stringify(promptContent)}` }
 				],
-				temperature: 0.5,
 				system: systemContent
 			};
 			headers = {
@@ -104,15 +150,14 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 			requestUrl = provider.baseUrl;
 			requestBody = {
 				model: model.providerModelId,
-				max_tokens: 1600,
+				max_tokens: 8000,
 				messages: [
 					{ role: 'system', content: systemContent },
 					{ role: 'user', content: `
 						"${promptContext}"
 						"${JSON.stringify(promptContent)}"`
 					}
-				],
-				temperature: 0.3
+				]
 			};
 			headers = {
 				...headers,
@@ -131,7 +176,6 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 				],
 				format: 'json',
 				num_ctx: 120000,
-				temperature: 0.5,
 				stream: false
 			};
 		} else {
@@ -143,7 +187,8 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 					{ role: 'system', content: systemContent },
 					{ role: 'user', content: `${promptContext}` },
 					{ role: 'user', content: `${JSON.stringify(promptContent)}` }
-				]
+				],
+				stream: false
 			};
 			headers = {
 				...headers,
@@ -191,10 +236,19 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 
 		lastRequestTime = now;
 
+		// Surface truncated responses instead of silently saving incomplete output
+		const finishReason = data.stop_reason // Anthropic
+			?? data.done_reason // Ollama
+			?? data.candidates?.[0]?.finishReason // Gemini
+			?? data.choices?.[0]?.finish_reason; // OpenAI-compatible providers
+		if (finishReason === 'max_tokens' || finishReason === 'length' || finishReason === 'MAX_TOKENS') {
+			throw new Error(`${provider.name} response was cut off because it reached the output token limit. Try shorter prompts or a smaller prompt context.`);
+		}
+
 		let llmResponseContent: string;
 		if (provider.name.toLowerCase().includes('anthropic')) {
-			// Handle Anthropic's nested content structure
-			const textContent = data.content[0]?.text;
+			// Find the text block — newer models may return a thinking block first
+			const textContent = data.content?.find((block: any) => block.type === 'text')?.text;
 			if (textContent) {
 				try {
 					// Try to parse the inner content first
@@ -202,6 +256,20 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 					llmResponseContent = JSON.stringify(parsed);
 				} catch {
 					// If parsing fails, use the raw text
+					llmResponseContent = textContent;
+				}
+			} else {
+				llmResponseContent = JSON.stringify(data);
+			}
+		} else if (provider.baseUrl.includes('generativelanguage.googleapis.com')) {
+			// Native Gemini responses carry text in candidate content parts
+			const parts = data.candidates?.[0]?.content?.parts;
+			const textContent = Array.isArray(parts) ? parts.map((part: any) => part.text || '').join('') : undefined;
+			if (textContent) {
+				try {
+					const parsed = JSON.parse(textContent);
+					llmResponseContent = JSON.stringify(parsed);
+				} catch {
 					llmResponseContent = textContent;
 				}
 			} else {
@@ -220,7 +288,7 @@ export async function sendToLLM(promptContext: string, content: string, promptVa
 				llmResponseContent = JSON.stringify(data);
 			}
 		} else {
-			llmResponseContent = data.choices[0]?.message?.content || JSON.stringify(data);
+			llmResponseContent = data.choices?.[0]?.message?.content || JSON.stringify(data);
 		}
 		debugLog('Interpreter', 'Processed LLM response:', llmResponseContent);
 
@@ -325,7 +393,7 @@ function parseLLMResponse(responseContent: string, promptVariables: PromptVariab
 		// Validate the response structure
 		if (!parsedResponse?.prompts_responses) {
 			debugLog('Interpreter', 'No prompts_responses found in parsed response', parsedResponse);
-			return { promptResponses: [] };
+			throw new Error('The model response did not contain any prompt responses.');
 		}
 
 		// Convert escaped newlines to actual newlines in the responses
@@ -352,7 +420,7 @@ function parseLLMResponse(responseContent: string, promptVariables: PromptVariab
 			error: parseError,
 			responseContent: responseContent
 		});
-		return { promptResponses: [] };
+		throw new Error('The model returned a response that could not be parsed. It may be incomplete or malformed.');
 	}
 }
 
@@ -592,6 +660,9 @@ export async function handleInterpreterUI(
 		// Update fields with responses
 		replacePromptVariables(promptVariables, promptResponses);
 
+		// Update fields with details of the model that was used
+		replaceModelVariables(modelConfig, provider);
+
 		// Re-enable clip button
 		clipButton.disabled = false;
 		moreButton.disabled = false;
@@ -633,6 +704,29 @@ export async function handleInterpreterUI(
 	}
 }
 
+// Replace model variables ({{model}}, {{modelId}}, {{modelProvider}}) with
+// details of the model used to interpret the page
+export function replaceModelVariables(modelConfig: ModelConfig, provider: Provider) {
+	const modelValues: { [key: string]: string } = {
+		model: modelConfig.name,
+		modelId: modelConfig.providerModelId,
+		modelProvider: provider.name
+	};
+
+	const allInputs = document.querySelectorAll('input, textarea');
+	allInputs.forEach((input) => {
+		if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
+			input.value = input.value.replace(/{{(modelProvider|modelId|model)(\|[\s\S]*?)?}}/g, (match, name, filters) => {
+				let value = modelValues[name];
+				if (filters) {
+					value = applyFilters(value, filters.slice(1));
+				}
+				return value;
+			});
+		}
+	});
+}
+
 // Similar to replaceVariables, but happens after the LLM response is received
 export function replacePromptVariables(promptVariables: PromptVariable[], promptResponses: any[]) {
 	const allInputs = document.querySelectorAll('input, textarea');
@@ -664,11 +758,6 @@ export function replacePromptVariables(promptVariables: PromptVariable[], prompt
 				}
 				return match; // Return original if no match found
 			});
-
-			// Adjust height for noteNameField after updating its value
-			if (input.id === 'note-name-field' && input instanceof HTMLTextAreaElement) {
-				adjustNoteNameHeight(input);
-			}
 		}
 	});
 }

@@ -26,6 +26,9 @@
 	"advanced": {
 		"message": "Avanceret"
 	},
+	"allHighlights": {
+		"message": "Alle markeringer"
+	},
 	"allProperties": {
 		"message": "Alle egenskaber"
 	},
@@ -162,6 +165,15 @@
 	"delete": {
 		"message": "Slet"
 	},
+	"deleteAllHighlightsConfirm": {
+		"message": "Er du sikker på, at du vil slette alle markeringer?"
+	},
+	"deleteHighlightsForDomain": {
+		"message": "Slet alle markeringer for dette domæne?"
+	},
+	"deleteHighlightsForPage": {
+		"message": "Slet alle markeringer for denne side?"
+	},
 	"deleteModelConfirm": {
 		"message": "Er du sikker på, at du vil slette denne model?"
 	},
@@ -196,6 +208,9 @@
 	},
 	"earlyAccessFeatures": {
 		"message": "Tidlig adgang-funktioner"
+	},
+	"edit": {
+		"message": "Rediger"
 	},
 	"editModel": {
 		"message": "Redigér model"
@@ -351,6 +366,9 @@
 	"highlightPage": {
 		"message": "Fremhæv side"
 	},
+	"highlightSelection": {
+		"message": "Fremhæv"
+	},
 	"highlighter": {
 		"message": "Fremhævning"
 	},
@@ -359,6 +377,20 @@
 	},
 	"highlighterSettings": {
 		"message": "Fremhævning"
+	},
+	"highlights": {
+		"message": "Markeringer"
+	},
+	"highlightsImportSuccess": {
+		"message": "Importerede $1 fremhævninger.",
+		"placeholders": {
+			"1": {
+				"content": "$1"
+			}
+		}
+	},
+	"highlightsNotFound": {
+		"message": "Markeringer blev ikke fundet i artiklen"
 	},
 	"history": {
 		"message": "Historik"
@@ -377,6 +409,12 @@
 	},
 	"importFailed": {
 		"message": "Import mislykkedes. Tjek konsollen for detaljer."
+	},
+	"importHighlights": {
+		"message": "Importér fremhævninger"
+	},
+	"importHighlightsDescription": {
+		"message": "Importér fremhævninger fra en fil. Eksisterende fremhævninger bevares."
 	},
 	"importModalTitle": {
 		"message": "Importér"
@@ -445,6 +483,12 @@
 	"legacyModeDescription": {
 		"message": "Bruger URI-indfangningsmetoden som er kompatibel med Obsidian 1.6.7 og ældre. Bemærk at længden af indfanget indhold er begrænset af browseren og operativsystemet. Nogle sider kan fejle uden fejlmeddelelse."
 	},
+	"loadArticle": {
+		"message": "Læs artikel"
+	},
+	"loading": {
+		"message": "Indlæser…"
+	},
 	"modelName": {
 		"message": "Modelnavn"
 	},
@@ -477,6 +521,9 @@
 	},
 	"noHighlights": {
 		"message": "Ingen fremhævninger"
+	},
+	"noResults": {
+		"message": "Ingen resultater fundet"
 	},
 	"noTemplates": {
 		"message": "Ingen tilgængelige skabeloner. Tilføj en skabelon i indstillingerne."
@@ -522,6 +569,12 @@
 	},
 	"openEmbedded": {
 		"message": "Åbn på side"
+	},
+	"openHighlights": {
+		"message": "Åbn markeringer"
+	},
+	"openReader": {
+		"message": "Åbn læser"
 	},
 	"openSidePanel": {
 		"message": "Åbn sidepanel"
@@ -739,6 +792,9 @@
 	"readerFontSystemSerif": {
 		"message": "Serif"
 	},
+	"readerFontUnavailable": {
+		"message": "Denne skrifttype er ikke tilgængelig her — din browser blokerer muligvis brugerdefinerede skrifttyper."
+	},
 	"readerFonts": {
 		"message": "Skrifttyper"
 	},
@@ -759,6 +815,9 @@
 	},
 	"readerLineWidth": {
 		"message": "Linjebredde"
+	},
+	"readerLoadFailed": {
+		"message": "Kunne ikke indlæse. Siden kan være blokeret af din browser."
 	},
 	"readerLoading": {
 		"message": "Fjerner støj…"
@@ -789,6 +848,9 @@
 	},
 	"readerTypography": {
 		"message": "Typografi"
+	},
+	"readerUrlPlaceholder": {
+		"message": "Indsæt en URL for at læse…"
 	},
 	"readerViewFullSize": {
 		"message": "Vis i fuld størrelse"
@@ -843,6 +905,9 @@
 	},
 	"saveFile": {
 		"message": "Gem fil..."
+	},
+	"searchHighlightsPlaceholder": {
+		"message": "Søg i markeringer…"
 	},
 	"searchVariables": {
 		"message": "Søg i variabler..."
@@ -903,6 +968,21 @@
 	},
 	"silentOpenDescription": {
 		"message": "Klippede noter vil blive gemt men ikke åbnet i en ny fane. Obsidian vil stadig blive bragt i forgrunden."
+	},
+	"sort": {
+		"message": "Sortér"
+	},
+	"sortAZ": {
+		"message": "A til Z"
+	},
+	"sortNewOld": {
+		"message": "Nyeste først"
+	},
+	"sortOldNew": {
+		"message": "Ældste først"
+	},
+	"sortZA": {
+		"message": "Z til A"
 	},
 	"specificNoteName": {
 		"message": "Specifikt notenavn"

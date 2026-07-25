@@ -57,6 +57,16 @@
 		7AEF05F22CA0F50D005FFBC2 /* content.js in Resources */ = {isa = PBXBuildFile; fileRef = 7AEF05D62CA0F50D005FFBC2 /* content.js */; };
 		7AEF05F32CA0F50D005FFBC2 /* settings.html in Resources */ = {isa = PBXBuildFile; fileRef = 7AEF05D82CA0F50D005FFBC2 /* settings.html */; };
 		7AEF05F52CA0F50D005FFBC2 /* settings.js in Resources */ = {isa = PBXBuildFile; fileRef = 7AEF05DA2CA0F50D005FFBC2 /* settings.js */; };
+		AF3D6D452F8B297F004F2D8D /* highlights.html in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D412F8B297F004F2D8D /* highlights.html */; };
+		AF3D6D462F8B297F004F2D8D /* highlights.js in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D422F8B297F004F2D8D /* highlights.js */; };
+		AF3D6D472F8B297F004F2D8D /* reader-page.js in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D442F8B297F004F2D8D /* reader-page.js */; };
+		AF3D6D482F8B297F004F2D8D /* reader.html in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D432F8B297F004F2D8D /* reader.html */; };
+		AF3D6D492F8B297F004F2D8D /* highlights.html in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D412F8B297F004F2D8D /* highlights.html */; };
+		AF3D6D4A2F8B297F004F2D8D /* highlights.js in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D422F8B297F004F2D8D /* highlights.js */; };
+		AF3D6D4B2F8B297F004F2D8D /* reader-page.js in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D442F8B297F004F2D8D /* reader-page.js */; };
+		AF3D6D4C2F8B297F004F2D8D /* reader.html in Resources */ = {isa = PBXBuildFile; fileRef = AF3D6D432F8B297F004F2D8D /* reader.html */; };
+		AF4F759B2F9C1AD80072BA9B /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AF4F759A2F9C1AD80072BA9B /* AppIcon.icon */; };
+		AF4F759C2F9C1AD80072BA9B /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AF4F759A2F9C1AD80072BA9B /* AppIcon.icon */; };
 		AFA233A52F63522E00F39577 /* flatten-shadow-dom.js in Resources */ = {isa = PBXBuildFile; fileRef = AFA233A42F63522E00F39577 /* flatten-shadow-dom.js */; };
 		AFA233A62F63522E00F39577 /* flatten-shadow-dom.js in Resources */ = {isa = PBXBuildFile; fileRef = AFA233A42F63522E00F39577 /* flatten-shadow-dom.js */; };
 		AFA233A72F63522E00F39577 /* flatten-shadow-dom.js in Resources */ = {isa = PBXBuildFile; fileRef = AFA233A42F63522E00F39577 /* flatten-shadow-dom.js */; };
@@ -143,6 +153,11 @@
 		7AEF05D62CA0F50D005FFBC2 /* content.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = content.js; path = ../../../dist_safari/content.js; sourceTree = "<group>"; };
 		7AEF05D82CA0F50D005FFBC2 /* settings.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = settings.html; path = ../../../dist_safari/settings.html; sourceTree = "<group>"; };
 		7AEF05DA2CA0F50D005FFBC2 /* settings.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = settings.js; path = ../../../dist_safari/settings.js; sourceTree = "<group>"; };
+		AF3D6D412F8B297F004F2D8D /* highlights.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = highlights.html; path = ../../../dist_safari/highlights.html; sourceTree = "<group>"; };
+		AF3D6D422F8B297F004F2D8D /* highlights.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = highlights.js; path = ../../../dist_safari/highlights.js; sourceTree = "<group>"; };
+		AF3D6D432F8B297F004F2D8D /* reader.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = reader.html; path = ../../../dist_safari/reader.html; sourceTree = "<group>"; };
+		AF3D6D442F8B297F004F2D8D /* reader-page.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "reader-page.js"; path = "../../../dist_safari/reader-page.js"; sourceTree = "<group>"; };
+		AF4F759A2F9C1AD80072BA9B /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		AFA233A42F63522E00F39577 /* flatten-shadow-dom.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "flatten-shadow-dom.js"; path = "../../../dist_safari/flatten-shadow-dom.js"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -195,6 +210,7 @@
 			isa = PBXGroup;
 			children = (
 				7AEF05732CA0F50D005FFBC2 /* ViewController.swift */,
+				AF4F759A2F9C1AD80072BA9B /* AppIcon.icon */,
 				7AEF05742CA0F50D005FFBC2 /* Assets.xcassets */,
 				7AEF056D2CA0F50D005FFBC2 /* Resources */,
 			);
@@ -290,6 +306,10 @@
 				7A6535C82D8B530300DDF54C /* reader-script.js */,
 				7AEF05DA2CA0F50D005FFBC2 /* settings.js */,
 				AFA233A42F63522E00F39577 /* flatten-shadow-dom.js */,
+				AF3D6D412F8B297F004F2D8D /* highlights.html */,
+				AF3D6D422F8B297F004F2D8D /* highlights.js */,
+				AF3D6D432F8B297F004F2D8D /* reader.html */,
+				AF3D6D442F8B297F004F2D8D /* reader-page.js */,
 			);
 			name = Resources;
 			path = "Shared (Extension)";
@@ -422,6 +442,7 @@
 			files = (
 				7AEF05AD2CA0F50D005FFBC2 /* Icon.png in Resources */,
 				7AEF05842CA0F50D005FFBC2 /* Base in Resources */,
+				AF4F759B2F9C1AD80072BA9B /* AppIcon.icon in Resources */,
 				7AEF05AB2CA0F50D005FFBC2 /* Base in Resources */,
 				7AEF05B12CA0F50D005FFBC2 /* Script.js in Resources */,
 				7AEF05B52CA0F50D005FFBC2 /* Assets.xcassets in Resources */,
@@ -440,6 +461,7 @@
 				7AEF05932CA0F50D005FFBC2 /* Base in Resources */,
 				AFA233A72F63522E00F39577 /* flatten-shadow-dom.js in Resources */,
 				7AEF05B22CA0F50D005FFBC2 /* Script.js in Resources */,
+				AF4F759C2F9C1AD80072BA9B /* AppIcon.icon in Resources */,
 				7AEF05B62CA0F50D005FFBC2 /* Assets.xcassets in Resources */,
 				7AEF05AC2CA0F50D005FFBC2 /* Base in Resources */,
 			);
@@ -456,6 +478,10 @@
 				7AEF05EA2CA0F50D005FFBC2 /* background.js in Resources */,
 				7AEF05F02CA0F50D005FFBC2 /* style.css in Resources */,
 				7AEF05ED2CA0F50D005FFBC2 /* popup.html in Resources */,
+				AF3D6D492F8B297F004F2D8D /* highlights.html in Resources */,
+				AF3D6D4A2F8B297F004F2D8D /* highlights.js in Resources */,
+				AF3D6D4B2F8B297F004F2D8D /* reader-page.js in Resources */,
+				AF3D6D4C2F8B297F004F2D8D /* reader.html in Resources */,
 				7AEF05EE2CA0F50D005FFBC2 /* browser-polyfill.min.js in Resources */,
 				7AEF05F22CA0F50D005FFBC2 /* content.js in Resources */,
 				7AEF05F12CA0F50D005FFBC2 /* manifest.json in Resources */,
@@ -478,6 +504,10 @@
 				7AEF05DD2CA0F50D005FFBC2 /* background.js in Resources */,
 				7AEF05E32CA0F50D005FFBC2 /* style.css in Resources */,
 				7AEF05E02CA0F50D005FFBC2 /* popup.html in Resources */,
+				AF3D6D452F8B297F004F2D8D /* highlights.html in Resources */,
+				AF3D6D462F8B297F004F2D8D /* highlights.js in Resources */,
+				AF3D6D472F8B297F004F2D8D /* reader-page.js in Resources */,
+				AF3D6D482F8B297F004F2D8D /* reader.html in Resources */,
 				7AEF05E12CA0F50D005FFBC2 /* browser-polyfill.min.js in Resources */,
 				7AEF05E52CA0F50D005FFBC2 /* content.js in Resources */,
 				7AEF05E42CA0F50D005FFBC2 /* manifest.json in Resources */,
@@ -702,7 +732,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Obsidian Web Clipper Extension";
@@ -713,7 +743,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -732,7 +762,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Obsidian Web Clipper Extension";
@@ -743,7 +773,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -766,10 +796,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Obsidian Web Clipper";
+				INFOPLIST_KEY_CFBundleDisplayName = "Web Clipper";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
@@ -781,7 +811,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -804,10 +834,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Obsidian Web Clipper";
+				INFOPLIST_KEY_CFBundleDisplayName = "Web Clipper";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
@@ -819,7 +849,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -842,7 +872,7 @@
 				CODE_SIGN_ENTITLEMENTS = "macOS (Extension)/Obsidian Web Clipper.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "Shared\\ (App)/Assets.xcassets";
 				ENABLE_APP_SANDBOX = YES;
@@ -858,7 +888,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -878,7 +908,7 @@
 				CODE_SIGN_ENTITLEMENTS = "macOS (Extension)/Obsidian Web Clipper.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "Shared\\ (App)/Assets.xcassets";
 				ENABLE_APP_SANDBOX = YES;
@@ -894,7 +924,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -917,7 +947,7 @@
 				CODE_SIGN_ENTITLEMENTS = "macOS (App)/Obsidian Web Clipper.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -934,7 +964,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -958,7 +988,7 @@
 				CODE_SIGN_ENTITLEMENTS = "macOS (App)/Obsidian Web Clipper.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 46;
+				CURRENT_PROJECT_VERSION = 54;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -975,7 +1005,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.7.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,

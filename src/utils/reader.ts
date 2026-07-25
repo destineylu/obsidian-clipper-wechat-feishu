@@ -5,10 +5,32 @@ import { flattenShadowDom as flattenShadowDomUtil } from './flatten-shadow-dom';
 import { getLocalStorage, setLocalStorage } from './storage-utils';
 import hljs from 'highlight.js';
 import { getDomain } from './string-utils';
-import { applyHighlights, invalidateHighlightCache, loadHighlights, toggleHighlighterMenu } from './highlighter';
+import type { HighlighterAPI } from './highlighter';
+import * as localHighlighter from './highlighter';
+import { removeExistingHighlights as localRemoveExistingHighlights } from './highlighter-overlays';
+
+// Bridge: on a live page with reader mode (case 2), content.js already loaded
+// and owns the highlighter module. reader-script.js delegates to it via this
+// window global to avoid two independent `highlights[]` arrays on the same
+// tab. On the standalone reader.html (case 3), no content.js exists — the
+// direct import is the only copy and serves as the fallback. Cached after
+// first resolution so the fallback spread doesn't re-allocate per call.
+let _hl: HighlighterAPI;
+function hl(): HighlighterAPI {
+	return _hl ??= window.__obsidianHighlighter ?? {
+		...localHighlighter,
+		removeExistingHighlights: localRemoveExistingHighlights,
+		ensureHighlighterCSS: () => Reader.ensureHighlighterCSS(document),
+	};
+}
 import { copyToClipboard } from './clipboard-utils';
 import { getMessage, initializeI18n } from './i18n';
-import { getFontCss } from './font-utils';
+import { getFontCss, isFontAvailable } from './font-utils';
+import { createMarkdownContent } from 'defuddle/full';
+import { saveFile } from './file-utils';
+import { parseForClip } from './clip-utils';
+import { updateSidebarWidth, addResizeHandle, cleanupResizeHandlers } from './iframe-resize';
+import { setElementHTML, setSVGChildren, serializeChildren } from './dom-utils';
 
 // Mobile viewport settings
 const VIEWPORT = 'width=device-width, initial-scale=1, maximum-scale=1';
@@ -31,6 +53,25 @@ export class Reader {
 	private static hasApplied: boolean = false;
 	private static isActive: boolean = false;
 	private static programmaticScroll: boolean = false;
+
+	static isReaderPage: boolean = false;
+
+	// Callback for SPA-style navigation on the reader page.
+	// Set by reader-view.ts to handle link clicks without full page reload.
+	static onNavigate: ((url: string) => void) | null = null;
+
+	// Pre-extracted content to skip Defuddle re-extraction in Reader.apply.
+	// Set this before calling apply() to use already-extracted content.
+	static preExtractedContent: {
+		content: string;
+		title?: string;
+		author?: string;
+		published?: string;
+		domain?: string;
+		wordCount?: number;
+		parseTime?: number;
+		extractorType?: string;
+	} | null = null;
 
 	/**
 	 * Helper function to create SVG elements
@@ -98,6 +139,10 @@ export class Reader {
 		return svg;
 	}
 	private static settingsBar: HTMLElement | null = null;
+	private static fontNotice: HTMLElement | null = null;
+	// Safari and Firefox farble canvas text metrics, so the canvas-based font
+	// probe is unreliable there; fall back to the Font Loading API instead.
+	private static fontProbeBlocked: boolean = false;
 	private static colorSchemeMediaQuery: MediaQueryList | null = null;
 	private static readerStyles: HTMLLinkElement | null = null;
 	private static lightbox: HTMLElement | null = null;
@@ -114,6 +159,7 @@ export class Reader {
 		defaultFont: '',
 		blendImages: true,
 		colorLinks: false,
+		followLinks: true,
 		pinPlayer: true,
 		autoScroll: true,
 		highlightActiveLine: true,
@@ -173,10 +219,7 @@ export class Reader {
 		highlighterBtn.addEventListener('click', async () => {
 			clipDropdown.classList.remove('is-open');
 			settingsBar.classList.remove('is-open');
-			const response = await browser.runtime.sendMessage({ action: 'getActiveTab' }) as { tabId?: number };
-			if (response.tabId) {
-				await browser.runtime.sendMessage({ action: 'toggleHighlighterMode', tabId: response.tabId });
-			}
+			await Reader.toggleHighlighter(doc);
 		});
 
 		// Sync active state with highlighter mode
@@ -204,10 +247,14 @@ export class Reader {
 		obsidianIcon.setAttribute('height', '18');
 		obsidianIcon.setAttribute('viewBox', '0 0 256 256');
 		obsidianIcon.setAttribute('fill', 'currentColor');
-		obsidianIcon.innerHTML = '<path d="M94.82 149.44c6.53-1.94 17.13-4.9 29.26-5.71a102.97 102.97 0 0 1-7.64-48.84c1.63-16.51 7.54-30.38 13.25-42.1l3.47-7.14 4.48-9.18c2.35-5 4.08-9.38 4.9-13.56.81-4.07.81-7.64-.2-11.11-1.03-3.47-3.07-7.14-7.15-11.21a17.02 17.02 0 0 0-15.8 3.77l-52.81 47.5a17.12 17.12 0 0 0-5.5 10.2l-4.5 30.18a149.26 149.26 0 0 1 38.24 57.2ZM54.45 106l-1.02 3.06-27.94 62.2a17.33 17.33 0 0 0 3.27 18.96l43.94 45.16a88.7 88.7 0 0 0 8.97-88.5A139.47 139.47 0 0 0 54.45 106Z"/><path d="m82.9 240.79 2.34.2c8.26.2 22.33 1.02 33.64 3.06 9.28 1.73 27.73 6.83 42.82 11.21 11.52 3.47 23.45-5.8 25.08-17.73 1.23-8.67 3.57-18.46 7.75-27.53a94.81 94.81 0 0 0-25.9-40.99 56.48 56.48 0 0 0-29.56-13.35 96.55 96.55 0 0 0-40.99 4.79 98.89 98.89 0 0 1-15.29 80.34h.1Z"/><path d="M201.87 197.76a574.87 574.87 0 0 0 19.78-31.6 8.67 8.67 0 0 0-.61-9.48 185.58 185.58 0 0 1-21.82-35.9c-5.91-14.16-6.73-36.08-6.83-46.69 0-4.07-1.22-8.05-3.77-11.21l-34.16-43.33c0 1.94-.4 3.87-.81 5.81a76.42 76.42 0 0 1-5.71 15.9l-4.7 9.8-3.36 6.72a111.95 111.95 0 0 0-12.03 38.23 93.9 93.9 0 0 0 8.67 47.92 67.9 67.9 0 0 1 39.56 16.52 99.4 99.4 0 0 1 25.8 37.31Z"/>';
+		setSVGChildren(obsidianIcon, '<path d="M94.82 149.44c6.53-1.94 17.13-4.9 29.26-5.71a102.97 102.97 0 0 1-7.64-48.84c1.63-16.51 7.54-30.38 13.25-42.1l3.47-7.14 4.48-9.18c2.35-5 4.08-9.38 4.9-13.56.81-4.07.81-7.64-.2-11.11-1.03-3.47-3.07-7.14-7.15-11.21a17.02 17.02 0 0 0-15.8 3.77l-52.81 47.5a17.12 17.12 0 0 0-5.5 10.2l-4.5 30.18a149.26 149.26 0 0 1 38.24 57.2ZM54.45 106l-1.02 3.06-27.94 62.2a17.33 17.33 0 0 0 3.27 18.96l43.94 45.16a88.7 88.7 0 0 0 8.97-88.5A139.47 139.47 0 0 0 54.45 106Z"/><path d="m82.9 240.79 2.34.2c8.26.2 22.33 1.02 33.64 3.06 9.28 1.73 27.73 6.83 42.82 11.21 11.52 3.47 23.45-5.8 25.08-17.73 1.23-8.67 3.57-18.46 7.75-27.53a94.81 94.81 0 0 0-25.9-40.99 56.48 56.48 0 0 0-29.56-13.35 96.55 96.55 0 0 0-40.99 4.79 98.89 98.89 0 0 1-15.29 80.34h.1Z"/><path d="M201.87 197.76a574.87 574.87 0 0 0 19.78-31.6 8.67 8.67 0 0 0-.61-9.48 185.58 185.58 0 0 1-21.82-35.9c-5.91-14.16-6.73-36.08-6.83-46.69 0-4.07-1.22-8.05-3.77-11.21l-34.16-43.33c0 1.94-.4 3.87-.81 5.81a76.42 76.42 0 0 1-5.71 15.9l-4.7 9.8-3.36 6.72a111.95 111.95 0 0 0-12.03 38.23 93.9 93.9 0 0 0 8.67 47.92 67.9 67.9 0 0 1 39.56 16.52 99.4 99.4 0 0 1 25.8 37.31Z"/>');
 		addToObsidianBtn.appendChild(obsidianIcon);
 		addToObsidianBtn.addEventListener('click', () => {
-			browser.runtime.sendMessage({ action: 'toggleIframe' });
+			if (Reader.isReaderPage) {
+				Reader.toggleReaderPageIframe(doc);
+			} else {
+				browser.runtime.sendMessage({ action: 'toggleIframe' });
+			}
 		});
 
 		const clipDropdown = doc.createElement('div');
@@ -230,12 +277,20 @@ export class Reader {
 			item.addEventListener('click', async () => {
 				if (action === 'copyToClipboard') {
 					const originalText = itemLabel.textContent;
-					browser.runtime.sendMessage({ action: 'copyMarkdownToClipboard' });
+					if (Reader.isReaderPage) {
+						Reader.copyMarkdownOnReaderPage(doc);
+					} else {
+						browser.runtime.sendMessage({ action: 'copyMarkdownToClipboard' });
+					}
 					itemLabel.textContent = getMessage('copied');
 					setTimeout(() => { itemLabel.textContent = originalText; }, 2000);
 				} else if (action === 'saveFile') {
 					clipDropdown.classList.remove('is-open');
-					browser.runtime.sendMessage({ action: 'saveMarkdownToFile' });
+					if (Reader.isReaderPage) {
+						Reader.saveMarkdownOnReaderPage(doc);
+					} else {
+						browser.runtime.sendMessage({ action: 'saveMarkdownToFile' });
+					}
 				}
 			});
 
@@ -559,6 +614,12 @@ export class Reader {
 		}
 		fontWrapper.appendChild(fontSelect);
 
+		const fontNotice = doc.createElement('div');
+		fontNotice.className = 'obsidian-reader-font-notice';
+		fontNotice.textContent = getMessage('readerFontUnavailable');
+		fontNotice.style.display = 'none';
+		this.fontNotice = fontNotice;
+
 		// Assemble everything
 		const typographyGroup = doc.createElement('div');
 		typographyGroup.className = 'obsidian-reader-settings-typography-group';
@@ -576,6 +637,7 @@ export class Reader {
 		dropdownGroup.appendChild(themeModeWrapper);
 		dropdownGroup.appendChild(themeWrapper);
 		dropdownGroup.appendChild(fontWrapper);
+		dropdownGroup.appendChild(fontNotice);
 		controlsContainer.appendChild(dropdownGroup);
 
 		const spacer2 = doc.createElement('div');
@@ -644,6 +706,11 @@ export class Reader {
 			this.applyFont(doc, fontSelect.value);
 			this.saveSettings();
 		});
+
+		// Surface the notice now, and re-check once any web fonts finish loading
+		// so a still-loading font isn't briefly flagged as unavailable.
+		this.updateFontNotice(doc, this.settings.defaultFont);
+		doc.fonts?.ready?.then(() => this.updateFontNotice(doc, this.settings.defaultFont)).catch(() => {});
 
 		// Notify content script to listen for highlighter button
 		document.dispatchEvent(new CustomEvent('obsidian-reader-init'));
@@ -720,6 +787,17 @@ export class Reader {
 		} else {
 			doc.body.style.removeProperty('--font-text');
 		}
+		this.updateFontNotice(doc, defaultFont);
+	}
+
+	// Warn when the chosen font can't actually render on this page. The most
+	// common cause is a browser (e.g. Brave on web origins) restricting access
+	// to locally installed fonts, which otherwise fails silently to sans-serif.
+	private static updateFontNotice(doc: Document, defaultFont: string): void {
+		const notice = this.fontNotice;
+		if (!notice) return;
+		const available = isFontAvailable(defaultFont, { doc, blocksCanvasProbe: this.fontProbeBlocked });
+		notice.style.display = available ? 'none' : '';
 	}
 
 	private static updateBlendImages(doc: Document, blend: boolean): void {
@@ -786,6 +864,12 @@ export class Reader {
 	}
 
 	private static async extractContent(doc: Document): Promise<ReaderContent> {
+		// Use pre-extracted content if available (set by reader-view.ts)
+		if (this.preExtractedContent) {
+			const pre = this.preExtractedContent;
+			this.preExtractedContent = null;
+			return pre;
+		}
 
 		const defuddle = new Defuddle(doc, { url: doc.URL });
 		const defuddled = await defuddle.parseAsync();
@@ -913,7 +997,23 @@ export class Reader {
 
 		// Set up intersection observer for headings
 		const allHeadings = [titleHeading, ...headings].filter(Boolean) as Element[];
+
+		// Suppress observer until user scrolls — on initial load images
+		// haven't rendered yet so headings below the fold appear in-view.
+		let outlineReady = !!window.location.hash || window.scrollY > 0;
+		if (!outlineReady) {
+			if (allHeadings[0]) setActiveOutlineItem(allHeadings[0]);
+			const onFirstScroll = () => {
+				outlineReady = true;
+				window.removeEventListener('scroll', onFirstScroll);
+				Reader.outlineScrollHandler = null;
+			};
+			window.addEventListener('scroll', onFirstScroll, { passive: true });
+			Reader.outlineScrollHandler = onFirstScroll;
+		}
+
 		const observerCallback = (entries: IntersectionObserverEntry[]) => {
+			if (!outlineReady) return;
 			entries.forEach(entry => {
 				if (entry.isIntersecting) {
 					setActiveOutlineItem(entry.target);
@@ -1017,9 +1117,11 @@ export class Reader {
 				outlineOverlay.appendChild(clone);
 
 				// Sync active/faint classes from sidebar outline to overlay clone
-				new MutationObserver(() => {
+				const syncObs = new MutationObserver(() => {
 					clone.className = (item as HTMLElement).className;
-				}).observe(item, { attributes: true, attributeFilter: ['class'] });
+				});
+				syncObs.observe(item, { attributes: true, attributeFilter: ['class'] });
+				this.outlineMutationObservers.push(syncObs);
 			});
 		}
 
@@ -1031,9 +1133,61 @@ export class Reader {
 	private static themeModeObserver: MutationObserver | null = null;
 	private static activePopover: HTMLElement | null = null;
 	private static activeFootnoteLink: HTMLAnchorElement | null = null;
+	private static footnoteClickHandler: ((e: Event) => void) | null = null;
+	private static footnoteScrollHandler: (() => void) | null = null;
+	private static footnoteResizeHandler: (() => void) | null = null;
+	private static lightboxKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+	private static outlineScrollHandler: (() => void) | null = null;
+	private static outlineMutationObservers: MutationObserver[] = [];
+
+	// Clean up event listeners and DOM elements from the previous page.
+	// Called before updateReaderContent to prevent stale state.
+	private static teardownContent(doc: Document) {
+		// Outline
+		if (this.observer) {
+			this.observer.disconnect();
+			this.observer = null;
+		}
+		if (this.outlineScrollHandler) {
+			window.removeEventListener('scroll', this.outlineScrollHandler);
+			this.outlineScrollHandler = null;
+		}
+		for (const obs of this.outlineMutationObservers) obs.disconnect();
+		this.outlineMutationObservers = [];
+		const outline = doc.querySelector('.obsidian-reader-outline') as HTMLElement;
+		if (outline) outline.textContent = '';
+		const outlineOverlay = doc.querySelector('.obsidian-reader-outline-overlay') as HTMLElement;
+		if (outlineOverlay) outlineOverlay.textContent = '';
+
+		// Footnotes
+		doc.querySelector('.footnote-popover')?.remove();
+		if (this.footnoteClickHandler) {
+			doc.removeEventListener('click', this.footnoteClickHandler);
+			this.footnoteClickHandler = null;
+		}
+		if (this.footnoteScrollHandler) {
+			doc.removeEventListener('scroll', this.footnoteScrollHandler);
+			this.footnoteScrollHandler = null;
+		}
+		if (this.footnoteResizeHandler) {
+			window.removeEventListener('resize', this.footnoteResizeHandler);
+			this.footnoteResizeHandler = null;
+		}
+		this.activePopover = null;
+		this.activeFootnoteLink = null;
+
+		// Lightbox
+		if (this.lightboxKeyHandler) {
+			doc.removeEventListener('keydown', this.lightboxKeyHandler);
+			this.lightboxKeyHandler = null;
+		}
+		doc.querySelector('.obsidian-reader-lightbox')?.remove();
+
+		// Highlights
+		hl().removeExistingHighlights();
+	}
 
 	private static initializeFootnotes(doc: Document) {
-		// Create popover container
 		const popover = doc.createElement('div');
 		popover.className = 'footnote-popover';
 		doc.body.appendChild(popover);
@@ -1058,7 +1212,7 @@ export class Reader {
 		});
 
 		// Handle footnote clicks
-		doc.addEventListener('click', (e) => {
+		this.footnoteClickHandler = (e: Event) => {
 			const target = e.target as HTMLElement;
 
 			// Handle backref clicks — scroll to the inline reference
@@ -1124,17 +1278,17 @@ export class Reader {
 					this.activeFootnoteLink = footnoteLink;
 				}
 			}
-		});
+		};
+		doc.addEventListener('click', this.footnoteClickHandler);
 
-		// Handle scroll and resize events
-		const updatePopoverPosition = () => {
+		this.footnoteScrollHandler = () => {
 			if (this.activeFootnoteLink && this.activePopover) {
 				this.positionPopover(this.activePopover, this.activeFootnoteLink);
 			}
 		};
-
-		doc.addEventListener('scroll', updatePopoverPosition, { passive: true });
-		window.addEventListener('resize', updatePopoverPosition);
+		this.footnoteResizeHandler = this.footnoteScrollHandler;
+		doc.addEventListener('scroll', this.footnoteScrollHandler, { passive: true });
+		window.addEventListener('resize', this.footnoteResizeHandler);
 	}
 
 	private static showFootnotePopover(popover: HTMLElement, link: HTMLAnchorElement) {
@@ -1751,7 +1905,7 @@ export class Reader {
 		});
 
 		// Keyboard navigation
-		doc.addEventListener('keydown', (e) => {
+		this.lightboxKeyHandler = (e: KeyboardEvent) => {
 			if (!this.lightbox?.classList.contains('active')) return;
 
 			switch (e.key) {
@@ -1765,7 +1919,8 @@ export class Reader {
 					this.showNextImage();
 					break;
 			}
-		});
+		};
+		doc.addEventListener('keydown', this.lightboxKeyHandler);
 	}
 
 	private static showLightbox(index: number) {
@@ -1845,8 +2000,10 @@ export class Reader {
 			let youtubeVideoElement: HTMLVideoElement | null = null;
 			const host = doc.URL ? new URL(doc.URL).hostname : '';
 			const isYouTube = host.includes('youtube.com') || host.includes('youtu.be');
-			// Browser type is only needed for YouTube-specific behavior
-			const browserType = isYouTube ? await detectBrowser() : '';
+			const browserType = await detectBrowser();
+			// Safari/Firefox block canvas font metrics, so the font-availability
+			// probe must fall back to the Font Loading API on those browsers.
+			this.fontProbeBlocked = ['safari', 'mobile-safari', 'ipad-os', 'orion', 'firefox', 'firefox-mobile'].includes(browserType);
 			if (isYouTube) {
 				const videoElement = doc.querySelector('video');
 				if (videoElement) {
@@ -1878,7 +2035,8 @@ export class Reader {
 			const contentPromise = this.extractContent(docClone);
 
 			// Use view transition for smooth crossfade into reader mode
-			if ('startViewTransition' in document) {
+			// Skip on the reader page where we're already in reader context
+			if ('startViewTransition' in document && !this.isReaderPage) {
 				await new Promise<void>(resolve => {
 					try {
 						const vt = (document as any).startViewTransition(() => {
@@ -1905,6 +2063,11 @@ export class Reader {
 			const htmlElement = doc.documentElement;
 			const lang = htmlElement.getAttribute('lang');
 			const dir = htmlElement.getAttribute('dir');
+
+			// Clear all html element attributes (e.g. scroll-locking classes/styles from the original page)
+			while (htmlElement.attributes.length > 0) {
+				htmlElement.removeAttribute(htmlElement.attributes[0].name);
+			}
 
 			// Restore lang and dir if they existed
 			if (lang) htmlElement.setAttribute('lang', lang);
@@ -2018,6 +2181,11 @@ export class Reader {
 			// Add reader classes and attributes
 			doc.documentElement.classList.add('obsidian-reader-active');
 
+			// Load the highlighter stylesheet. On a live page (case 2), this
+			// goes through content.js's bridge. On reader.html (case 3), the
+			// local implementation injects the <link> tag directly.
+			hl().ensureHighlighterCSS();
+
 			// Apply theme mode (sets theme-light/dark), then effective theme
 			this.updateThemeMode(doc, this.settings.appearance);
 
@@ -2041,7 +2209,7 @@ export class Reader {
 
 			// Re-activate highlighter if it was active before entering Reader
 			if (doc.body.classList.contains('obsidian-highlighter-active')) {
-				toggleHighlighterMenu(true);
+				hl().toggleHighlighterMenu(true);
 			}
 
 			// Re-attach the clipper iframe container only if it was
@@ -2050,18 +2218,22 @@ export class Reader {
 				doc.body.appendChild(clipperIframeContainer);
 			}
 
-			// Toggle dark mode with D key (visual only, doesn't change appearance setting)
-			doc.addEventListener('keydown', (e) => {
-				if (!this.isActive) return;
-				if ((e.key !== 'd' && e.key !== 'D') || e.ctrlKey || e.metaKey) return;
-				const tag = (document.activeElement as HTMLElement)?.tagName;
-				if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+			// D: toggle dark mode (visual only, doesn't change appearance setting)
+			Reader.registerHotkey(doc, 'd', () => {
 				const html = doc.documentElement;
 				const isDark = html.classList.contains('theme-dark');
 				html.classList.remove('theme-light', 'theme-dark');
 				html.classList.add(isDark ? 'theme-light' : 'theme-dark');
 				this.applyTheme(doc);
 			});
+
+			// H: toggle highlighter
+			Reader.registerHotkey(doc, 'h', () => Reader.toggleHighlighter(doc));
+
+			// Selection → highlight affordance. When highlighter is OFF and the
+			// user makes a normal text selection inside the article, surface a
+			// floating button that converts the selection into a highlight.
+			Reader.registerSelectionToHighlightButton(doc);
 
 			// Set up color scheme media query listener
 			this.colorSchemeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -2089,82 +2261,16 @@ export class Reader {
 				return;
 			}
 
-			// Add title
-			if (title) {
-				const h1 = doc.createElement('h1');
-				h1.textContent = title;
-				main.insertBefore(h1, article);
-			}
+			this.populateArticle(doc, main, article, { content, title, author, published, domain, wordCount, parseTime });
 
-			// Format and add metadata
-			let formattedDate = '';
-			if (published) {
-				try {
-					const date = new Date(published.split(',')[0].trim());
-					if (!isNaN(date.getTime())) {
-						formattedDate = new Intl.DateTimeFormat(undefined, {
-							year: 'numeric',
-							month: 'long',
-							day: 'numeric',
-							timeZone: 'UTC'
-						}).format(date);
-					} else {
-						formattedDate = published;
-					}
-				} catch (e) {
-					formattedDate = published;
-					console.log('Reader', 'Error formatting date:', e);
-				}
-			}
-
-			const authors = author ? author.split(/,\s*/) : [];
-			const metadataItems: {text: string, type: string}[] = [
-				...authors.map(a => ({text: a, type: 'author'})),
-				formattedDate ? {text: formattedDate, type: 'date'} : null,
-				domain ? {text: domain, type: 'domain'} : null,
-			].filter((item): item is {text: string, type: string} => item !== null);
-
-			if (metadataItems.length > 0) {
-				const metadata = doc.createElement('div');
-				metadata.className = 'metadata';
-				const metadataDetails = doc.createElement('div');
-				metadataDetails.className = 'metadata-details';
-
-				metadataItems.forEach((item, index) => {
-					if (index > 0) {
-						const separator = doc.createElement('span');
-						separator.textContent = ' · ';
-						metadataDetails.appendChild(separator);
-					}
-
-					const span = doc.createElement('span');
-					if (item.type === 'author') {
-						span.className = 'metadata-author';
-						span.textContent = item.text;
-					} else if (item.type === 'domain' && domain) {
-						const link = doc.createElement('a');
-						link.href = doc.URL;
-						link.textContent = domain;
-						span.appendChild(link);
-					} else {
-						span.textContent = item.text;
-					}
-					metadataDetails.appendChild(span);
-				});
-
-				metadata.appendChild(metadataDetails);
-				main.insertBefore(metadata, article);
-			}
-
-			// Insert article content
-			const parser = new DOMParser();
-			const contentDoc = parser.parseFromString(content, 'text/html');
-			const contentBody = contentDoc.body;
+			// Use the Defuddle-extracted title (article title only) instead of
+			// document.title (which often includes the site name suffix).
+			if (title) hl().setPageTitle(title);
 
 			// On YouTube, replace the Defuddle-generated iframe with the
 			// preserved native video element, or fall back to embed
 			if (isYouTube) {
-				const iframe = contentBody.querySelector('iframe[src*="youtube.com/embed/"]') as HTMLIFrameElement;
+				const iframe = article.querySelector('iframe[src*="youtube.com/embed/"]') as HTMLIFrameElement;
 				if (iframe && youtubeVideoElement) {
 					// Use the original video element instead of an iframe
 					youtubeVideoElement.className = 'reader-video-player';
@@ -2203,11 +2309,16 @@ export class Reader {
 						thumbnail.target = '_blank';
 						thumbnail.rel = 'noopener';
 						thumbnail.style.cssText = 'display:block;position:relative;aspect-ratio:16/9;max-width:100%;background:#000;border-radius:8px;overflow:hidden;';
-						thumbnail.innerHTML =
-							'<img src="https://img.youtube.com/vi/' + videoId + '/hqdefault.jpg" style="width:100%;height:100%;object-fit:cover;mix-blend-mode:normal!important;">'
-							+ '<svg style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:68px;height:48px;mix-blend-mode:normal!important;" viewBox="0 0 68 48">'
-							+ '<path d="M66.52 7.74c-.78-2.93-2.49-5.41-5.42-6.19C55.79.13 34 0 34 0S12.21.13 6.9 1.55c-2.93.78-4.63 3.26-5.42 6.19C.06 13.05 0 24 0 24s.06 10.95 1.48 16.26c.78 2.93 2.49 5.41 5.42 6.19C12.21 47.87 34 48 34 48s21.79-.13 27.1-1.55c2.93-.78 4.64-3.26 5.42-6.19C67.94 34.95 68 24 68 24s-.06-10.95-1.48-16.26z" fill="red"/>'
-							+ '<path d="M45 24L27 14v20" fill="white"/></svg>';
+						const thumbImg = doc.createElement('img');
+						thumbImg.src = 'https://img.youtube.com/vi/' + videoId + '/hqdefault.jpg';
+						thumbImg.style.cssText = 'width:100%;height:100%;object-fit:cover;mix-blend-mode:normal!important;';
+						const playSvg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+						playSvg.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:68px;height:48px;mix-blend-mode:normal!important;';
+						playSvg.setAttribute('viewBox', '0 0 68 48');
+						setSVGChildren(playSvg,
+							'<path d="M66.52 7.74c-.78-2.93-2.49-5.41-5.42-6.19C55.79.13 34 0 34 0S12.21.13 6.9 1.55c-2.93.78-4.63 3.26-5.42 6.19C.06 13.05 0 24 0 24s.06 10.95 1.48 16.26c.78 2.93 2.49 5.41 5.42 6.19C12.21 47.87 34 48 34 48s21.79-.13 27.1-1.55c2.93-.78 4.64-3.26 5.42-6.19C67.94 34.95 68 24 68 24s-.06-10.95-1.48-16.26z" fill="red"/>'
+							+ '<path d="M45 24L27 14v20" fill="white"/>');
+						thumbnail.replaceChildren(thumbImg, playSvg);
 						iframe.replaceWith(thumbnail);
 					} else {
 						await browser.runtime.sendMessage({
@@ -2228,18 +2339,9 @@ export class Reader {
 				}
 			}
 
-			while (contentBody.firstChild) {
-				article.appendChild(contentBody.firstChild);
-			}
-
 			// Store original article HTML before wireTranscript modifies
 			// the DOM (moves timestamps, wraps text, adds scrub track).
-			// Unwrap <span class="timestamp"> so Defuddle's markdown
-			// converter keeps the timestamp text inside <strong>.
-			const originalHtml = article.innerHTML.replace(
-				/<span class="timestamp"[^>]*>([^<]*)<\/span>/g, '$1'
-			);
-			article.setAttribute('data-original-html', originalHtml);
+			this.storeOriginalHtml(article);
 
 			wireTranscript(doc, article, this.settings, {
 				getStickyOffset: () => this.getStickyOffset(),
@@ -2250,38 +2352,11 @@ export class Reader {
 				this.saveSettings();
 			});
 
-			// Set extractor type
 			if (extractorType) {
 				doc.documentElement.setAttribute('data-reader-extractor', extractorType);
 			}
 
-			// Show footer with stats
-			const footerItems = [
-				'Obsidian Reader',
-				wordCount ? new Intl.NumberFormat().format(wordCount) + ' words' : '',
-				(parseTime ? 'parsed in ' + new Intl.NumberFormat().format(parseTime) + ' ms' : '')
-			].filter(Boolean);
-			footer.textContent = footerItems.join(' · ');
-			footer.style.display = '';
-
-			// Initialize content-dependent features
-			this.observer = this.generateOutline(doc, title);
-			if (!this.observer) {
-				const leftSidebar = doc.querySelector('.obsidian-reader-left-sidebar') as HTMLElement;
-				if (leftSidebar) {
-					leftSidebar.classList.add('is-empty');
-				}
-			}
-			this.initializeFootnotes(doc);
-			this.initializeCodeHighlighting(doc);
-			this.initializeCopyButtons(doc);
-			this.initializeLightbox(doc);
-			this.linkifyTextUrls(doc);
-			this.initializeComments(doc);
-
-			invalidateHighlightCache();
-			await loadHighlights();
-			applyHighlights();
+			await this.initializeContentFeatures(doc, title);
 
 		} catch (e) {
 			console.error('Reader', 'Error during apply:', e);
@@ -2309,6 +2384,114 @@ export class Reader {
 		}
 	}
 
+	// Floating "Highlight" button that appears on text selection while
+	// highlighter is OFF, and converts the selection into a highlight. When
+	// highlighter is ON, the usual mouseup path in highlighter-overlays.ts
+	// handles selections directly, so we stay out of its way.
+	private static registerSelectionToHighlightButton(doc: Document) {
+		// Idempotent: if Reader.apply runs again without a page reload (e.g.
+		// SPA navigation where we re-enter reader), don't stack a second
+		// button + three more listeners on the same document.
+		if (doc.querySelector('.obsidian-selection-action')) return;
+		const btn = doc.createElement('button');
+		btn.type = 'button';
+		btn.className = 'obsidian-selection-action';
+		btn.setAttribute('aria-label', getMessage('highlightSelection'));
+		setElementHTML(btn, `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg><span>${getMessage('highlightSelection')}</span>`);
+		btn.style.display = 'none';
+		// Preserve the selection when the pointer goes down on the button —
+		// otherwise the browser clears it before click handlers run.
+		btn.addEventListener('mousedown', e => e.preventDefault());
+		btn.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const sel = doc.getSelection();
+			if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+			// Create the highlight without entering highlighter mode — the
+			// user's intent is a single edit, not a session. handleTextSelection
+			// reads the live selection and clears it on return.
+			hl().handleTextSelection(sel);
+			hide();
+		});
+		doc.body.appendChild(btn);
+
+		const hide = () => { btn.style.display = 'none'; };
+
+		const update = () => {
+			if (!this.isActive) return hide();
+			if (doc.body.classList.contains('obsidian-highlighter-active')) return hide();
+			const sel = doc.getSelection();
+			if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hide();
+			const range = sel.getRangeAt(0);
+			const article = doc.querySelector('.obsidian-reader-content article');
+			if (!article || !article.contains(range.commonAncestorContainer)) return hide();
+			const rects = range.getClientRects();
+			if (rects.length === 0) return hide();
+			const last = rects[rects.length - 1];
+			btn.style.display = 'flex';
+			// Ensure the button stays within the viewport.
+			const btnWidth = btn.offsetWidth || 90;
+			const idealLeft = last.right + 2;
+			const clampedLeft = Math.min(idealLeft, window.innerWidth - btnWidth - 4);
+			btn.style.left = `${Math.max(4, clampedLeft) + window.scrollX}px`;
+			btn.style.top = `${last.bottom + window.scrollY - 6}px`;
+		};
+
+		// mouseup / keyup catch the end of a drag-select or shift-arrow select;
+		// selectionchange catches collapse-by-click so we can hide promptly.
+		doc.addEventListener('mouseup', () => setTimeout(update, 0));
+		doc.addEventListener('keyup', (e) => {
+			if (e.shiftKey || e.key === 'Shift') setTimeout(update, 0);
+		});
+		// selectionchange covers mobile (long-press + handles, no mouseup)
+		// and desktop keyboard selection (Ctrl+A, Shift+arrows). Debounced
+		// to avoid repositioning the button mid-drag on desktop.
+		let selChangeTimer: ReturnType<typeof setTimeout> | null = null;
+		doc.addEventListener('selectionchange', () => {
+			const sel = doc.getSelection();
+			if (!sel || sel.isCollapsed) {
+				if (selChangeTimer) { clearTimeout(selChangeTimer); selChangeTimer = null; }
+				hide();
+			} else {
+				if (selChangeTimer) clearTimeout(selChangeTimer);
+				selChangeTimer = setTimeout(update, 200);
+			}
+		});
+		window.addEventListener('resize', hide);
+	}
+
+	// Single-key hotkey wired to the reader document. Ignores presses while
+	// reader is inactive, while modifier keys are held, or while the user is
+	// typing in an input.
+	private static registerHotkey(doc: Document, key: string, handler: () => void) {
+		const lowerKey = key.toLowerCase();
+		doc.addEventListener('keydown', (e) => {
+			if (!this.isActive) return;
+			if (e.ctrlKey || e.metaKey || e.altKey) return;
+			if (e.key.toLowerCase() !== lowerKey) return;
+			const tag = (document.activeElement as HTMLElement)?.tagName;
+			if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+			handler();
+		});
+	}
+
+	// Inject highlighter.css for the standalone reader.html (case 3, no
+	// content.js). On live pages (case 2), hl() routes to content.js's
+	// Promise-cached version instead.
+	static ensureHighlighterCSS(doc: Document): void {
+		if (doc.getElementById('obsidian-highlighter-stylesheet')) return;
+		const link = doc.createElement('link');
+		link.id = 'obsidian-highlighter-stylesheet';
+		link.rel = 'stylesheet';
+		link.href = browser.runtime.getURL('highlighter.css');
+		(doc.head || doc.documentElement).appendChild(link);
+	}
+
+	static toggleHighlighter(doc: Document): void {
+		const willBeActive = !doc.body.classList.contains('obsidian-highlighter-active');
+		hl().toggleHighlighterMenu(willBeActive);
+	}
+
 	static async toggle(doc: Document): Promise<boolean> {
 		if (this.isActive) {
 			await this.restore(doc);
@@ -2319,6 +2502,304 @@ export class Reader {
 		} else {
 			await this.apply(doc);
 			return true;
+		}
+	}
+
+	private static initializeFollowLinks(doc: Document): void {
+		if (!this.settings.followLinks) return;
+
+		const article = doc.querySelector('.obsidian-reader-content article');
+		if (!article) return;
+
+		article.addEventListener('click', (e: Event) => {
+			const link = (e.target as Element).closest('a[href]') as HTMLAnchorElement | null;
+			if (!link) return;
+
+			const href = link.href;
+			if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+			if (link.getAttribute('href')?.startsWith('#')) return;
+
+			e.preventDefault();
+
+			if (this.isReaderPage && this.onNavigate) {
+				this.onNavigate(href);
+			} else if (this.isReaderPage) {
+				window.location.href = browser.runtime.getURL('reader.html?url=' + encodeURIComponent(href));
+			} else {
+				browser.runtime.sendMessage({ action: 'openReaderPage', url: href });
+			}
+		});
+	}
+
+	// Build title, metadata, article HTML, and footer into the given main element.
+	// Shared between apply() and updateReaderContent().
+	private static populateArticle(
+		doc: Document, main: HTMLElement, article: HTMLElement, content: ReaderContent
+	): void {
+		// Title
+		if (content.title) {
+			const h1 = doc.createElement('h1');
+			h1.textContent = content.title;
+			main.insertBefore(h1, article);
+		}
+
+		// Metadata
+		let formattedDate = '';
+		if (content.published) {
+			try {
+				const date = new Date(content.published.split(',')[0].trim());
+				formattedDate = !isNaN(date.getTime())
+					? new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(date)
+					: content.published;
+			} catch { formattedDate = content.published || ''; }
+		}
+		const authors = content.author ? content.author.split(/,\s*/) : [];
+		const metadataItems: {text: string, type: string}[] = [
+			...authors.map(a => ({text: a, type: 'author'})),
+			formattedDate ? {text: formattedDate, type: 'date'} : null,
+			content.domain ? {text: content.domain, type: 'domain'} : null,
+		].filter((item): item is {text: string, type: string} => item !== null);
+
+		if (metadataItems.length > 0) {
+			const metadata = doc.createElement('div');
+			metadata.className = 'metadata';
+			const metadataDetails = doc.createElement('div');
+			metadataDetails.className = 'metadata-details';
+			metadataItems.forEach((item, index) => {
+				if (index > 0) {
+					const sep = doc.createElement('span');
+					sep.textContent = ' · ';
+					metadataDetails.appendChild(sep);
+				}
+				const span = doc.createElement('span');
+				if (item.type === 'author') {
+					span.className = 'metadata-author';
+					span.textContent = item.text;
+				} else if (item.type === 'domain' && content.domain) {
+					const domain = content.domain;
+					const link = doc.createElement('a');
+					link.href = doc.URL;
+					link.textContent = domain;
+					span.appendChild(link);
+
+					// Async: append highlight count after domain if any exist
+					this.getHighlightCountForDomain(domain).then(count => {
+						if (count > 0) {
+							const sep = doc.createElement('span');
+							sep.textContent = ' · ';
+							metadataDetails.appendChild(sep);
+
+							const countLink = doc.createElement('a');
+							countLink.href = '#';
+							countLink.className = 'metadata-highlights';
+							countLink.textContent = `${count} highlight${count === 1 ? '' : 's'}`;
+							countLink.addEventListener('click', (e) => {
+								e.preventDefault();
+								browser.runtime.sendMessage({ action: 'openHighlights', domain });
+							});
+							metadataDetails.appendChild(countLink);
+						}
+					});
+				} else {
+					span.textContent = item.text;
+				}
+				metadataDetails.appendChild(span);
+			});
+			metadata.appendChild(metadataDetails);
+			main.insertBefore(metadata, article);
+		}
+
+		// Article content
+		if (content.content) {
+			const contentParser = new DOMParser();
+			const contentDoc = contentParser.parseFromString(content.content, 'text/html');
+			while (contentDoc.body.firstChild) {
+				article.appendChild(doc.adoptNode(contentDoc.body.firstChild));
+			}
+		}
+
+		// Footer
+		const footer = doc.querySelector('.obsidian-reader-footer') as HTMLElement | null;
+		if (footer) {
+			const footerItems = [
+				'Obsidian Reader',
+				content.wordCount ? new Intl.NumberFormat().format(content.wordCount) + ' words' : '',
+				content.parseTime ? 'parsed in ' + new Intl.NumberFormat().format(content.parseTime) + ' ms' : '',
+			].filter(Boolean);
+			footer.textContent = footerItems.join(' · ');
+			footer.style.display = '';
+		}
+	}
+
+	// Wrap each <table> in a scroll container so wide tables can scroll
+	// horizontally on mobile without blowing out the article width.
+	private static storeOriginalHtml(article: Element): void {
+		const clone = article.cloneNode(true) as Element;
+		clone.querySelectorAll('span.timestamp').forEach(span => {
+			span.replaceWith(span.textContent || '');
+		});
+		article.setAttribute('data-original-html', serializeChildren(clone));
+	}
+
+	private static wrapTables(doc: Document) {
+		const tables = doc.querySelectorAll('article table');
+		tables.forEach(table => {
+			if (table.parentElement?.classList.contains('table-wrapper')) return;
+			const wrapper = doc.createElement('div');
+			wrapper.className = 'table-wrapper';
+			table.parentNode?.insertBefore(wrapper, table);
+			wrapper.appendChild(table);
+		});
+	}
+
+	// Run all content-dependent feature initializations.
+	// Shared between apply() and updateReaderContent().
+	private static async initializeContentFeatures(doc: Document, title?: string): Promise<void> {
+		this.observer = this.generateOutline(doc, title);
+		const leftSidebar = doc.querySelector('.obsidian-reader-left-sidebar') as HTMLElement;
+		if (leftSidebar) {
+			leftSidebar.classList.toggle('is-empty', !this.observer);
+		}
+		this.initializeFootnotes(doc);
+		this.initializeCodeHighlighting(doc);
+		this.initializeCopyButtons(doc);
+		this.initializeLightbox(doc);
+		this.wrapTables(doc);
+		this.linkifyTextUrls(doc);
+		this.initializeComments(doc);
+		this.initializeFollowLinks(doc);
+
+		hl().invalidateHighlightCache();
+		await hl().loadHighlights();
+		hl().applyHighlights();
+	}
+
+	private static async getHighlightCountForDomain(domain: string): Promise<number> {
+		const result = await browser.storage.local.get('highlights');
+		const allHighlights = (result.highlights || {}) as Record<string, { highlights: any[]; url: string }>;
+		let count = 0;
+		for (const stored of Object.values(allHighlights)) {
+			try {
+				const hostname = new URL(stored.url).hostname.replace(/^www\./, '');
+				if (hostname === domain.replace(/^www\./, '')) {
+					count += stored.highlights.length;
+				}
+			} catch { /* skip invalid URLs */ }
+		}
+		return count;
+	}
+
+	// Replace article content in-place for SPA navigation on the reader page.
+	static async updateReaderContent(doc: Document, content: ReaderContent): Promise<void> {
+		const main = doc.querySelector('.obsidian-reader-content main') as HTMLElement | null;
+		if (!main) return;
+
+		this.teardownContent(doc);
+		main.textContent = '';
+
+		const article = doc.createElement('article');
+		main.appendChild(article);
+
+		this.populateArticle(doc, main, article, content);
+
+		const host = doc.URL ? new URL(doc.URL).hostname : '';
+		if (host.includes('youtube.com') || host.includes('youtu.be')) {
+			const iframe = article.querySelector('iframe[src*="youtube.com/embed/"]') as HTMLIFrameElement;
+			if (iframe) {
+				await browser.runtime.sendMessage({
+					action: 'enableYouTubeEmbedRule'
+				}).catch(() => {});
+				iframe.src = iframe.src;
+			}
+		}
+
+		this.storeOriginalHtml(article);
+
+		wireTranscript(doc, article, this.settings, {
+			getStickyOffset: () => this.getStickyOffset(),
+			scrollTo: (y) => this.scrollTo(y),
+			programmaticScroll: () => this.programmaticScroll,
+		}, (key, value) => {
+			(this.settings as any)[key] = value;
+			this.saveSettings();
+		});
+
+		await this.initializeContentFeatures(doc, content.title);
+	}
+
+	// --- Reader page helpers (extension page context) ---
+
+	static async toggleReaderPageIframe(doc: Document): Promise<void> {
+		const containerId = 'obsidian-clipper-container';
+		const iframeId = 'obsidian-clipper-iframe';
+
+		const existing = doc.getElementById(containerId);
+		if (existing) {
+			existing.classList.add('is-closing');
+			updateSidebarWidth(doc, null);
+			cleanupResizeHandlers(doc);
+			existing.addEventListener('animationend', () => {
+				existing.remove();
+				hl().repositionHighlights();
+			}, { once: true });
+			return;
+		}
+
+		const container = doc.createElement('div');
+		container.id = containerId;
+		container.classList.add('is-open');
+
+		const { clipperIframeWidth, clipperIframeHeight } = await browser.storage.local.get(['clipperIframeWidth', 'clipperIframeHeight']);
+		if (clipperIframeWidth) container.style.width = `${clipperIframeWidth}px`;
+		if (clipperIframeHeight) container.style.height = `${clipperIframeHeight}px`;
+
+		const iframe = doc.createElement('iframe');
+		iframe.id = iframeId;
+		iframe.allow = 'clipboard-write; web-share';
+		// Pass the article URL so the side panel can identify the page
+		// (tabs.get() can't see extension page URLs without the tabs permission)
+		iframe.src = browser.runtime.getURL('side-panel.html?context=iframe&readerUrl=' + encodeURIComponent(doc.URL));
+		container.appendChild(iframe);
+
+		const resizeCallbacks = {
+			onResize: () => hl().repositionHighlights(),
+			onResizeEnd: () => hl().repositionHighlights(),
+		};
+		addResizeHandle(doc, container, 'w', resizeCallbacks);
+		addResizeHandle(doc, container, 's', resizeCallbacks);
+		addResizeHandle(doc, container, 'sw', resizeCallbacks);
+
+		doc.body.appendChild(container);
+		updateSidebarWidth(doc, container);
+		container.addEventListener('animationend', () => hl().repositionHighlights(), { once: true });
+	}
+
+	static copyMarkdownOnReaderPage(doc: Document): void {
+		try {
+			const defuddled = parseForClip(doc);
+			const markdown = createMarkdownContent(defuddled.content, doc.URL);
+			navigator.clipboard.writeText(markdown).catch(() => {
+				const textArea = doc.createElement('textarea');
+				textArea.value = markdown;
+				doc.body.appendChild(textArea);
+				textArea.select();
+				doc.execCommand('copy');
+				doc.body.removeChild(textArea);
+			});
+		} catch (err) {
+			console.error('Failed to copy markdown:', err);
+		}
+	}
+
+	static async saveMarkdownOnReaderPage(doc: Document): Promise<void> {
+		try {
+			const defuddled = parseForClip(doc);
+			const markdown = createMarkdownContent(defuddled.content, doc.URL);
+			const title = defuddled.title || doc.title || 'Untitled';
+			const fileName = title.replace(/[/\\?%*:|"<>]/g, '-');
+			await saveFile({ content: markdown, fileName, mimeType: 'text/markdown' });
+		} catch (err) {
+			console.error('Failed to save markdown:', err);
 		}
 	}
 }
