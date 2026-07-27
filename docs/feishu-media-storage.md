@@ -37,10 +37,14 @@
    - `docx:document:readonly`
    - `docs:document.media:download`
    - `wiki:node:read`
+   - 如需电子表格只读预览：`sheets:spreadsheet:readonly`
+   - 如需多维表格只读预览：`bitable:app:readonly`
 3. 创建并发布包含这些权限的应用版本。
 4. 在 Web Clipper 的 **设置 → General → 飞书 / Lark** 中填写 App ID 和 App Secret。
 
 App Secret 只会发送给飞书/Lark 官方认证接口以获取租户令牌，不会发送给本项目的 Obsidian 配套插件。
+
+电子表格与多维表格会生成有行列上限的只读预览，并保留飞书原文链接。任务卡片完整详情需要用户 OAuth 和 `task:task:read`；当前版本只保留任务入口，不要求普通用户额外开放该权限。
 
 ## 安装 Obsidian 配套插件
 

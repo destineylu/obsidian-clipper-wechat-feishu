@@ -21,6 +21,8 @@
 
 - **完整内容** — 获取文档所有块内容，包括文字、标题、列表、代码块、表格、引用等
 - **Wiki 支持** — 同时支持飞书知识库（`/wiki/`）和普通文档（`/docx/`）链接
+- **复杂对象预览** — 支持直接剪藏 `/sheets/` 电子表格和 `/base/` 多维表格，也会展开文档内嵌的 Sheet/Bitable；大型资源只生成有界只读预览并保留原文入口
+- **不再静默丢块** — 任务卡片、OKR、思维笔记及暂未识别的块会显示明确的降级说明和原文链接，而不是从结果中消失
 - **结构保留** — 保留文档原有层级结构，转换为标准 HTML，可被 Obsidian Clipper 正常处理
 - **媒体策略独立** — 图片与视频/大附件分别选择保存方式，可组合成“图片本地化、视频保留链接”
 - **二进制附件流** — 通过 Obsidian 桌面端配套插件把大量图片直接写入 Vault，不再塞入 Base64 Markdown
@@ -48,7 +50,10 @@
 **配置方法：**
 
 1. 前往[飞书开放平台](https://open.feishu.cn/app)创建一个自建应用
-2. 为应用开通以下应用身份权限：`docx:document:readonly`、`docs:document.media:download`、`wiki:node:read`
+2. 为应用开通基础应用身份权限：`docx:document:readonly`、`docs:document.media:download`、`wiki:node:read`
+   - 读取电子表格预览：另开通 `sheets:spreadsheet:readonly`
+   - 读取多维表格预览：另开通 `bitable:app:readonly`
+   - 任务卡片完整详情需要用户 OAuth 和 `task:task:read`，当前版本只保留任务入口，不强制申请该高权限
 3. 获取应用的 App ID 和 App Secret（参见[官方文档：获取访问凭证](https://open.feishu.cn/document/server-docs/api-call-guide/calling-process/get-access-token#63c75bdc)）
 4. 打开 Obsidian Web Clipper 扩展 → 点击右上角 **设置** → **General** → 找到 **飞书 / Lark** 区块，填入 App ID 和 App Secret
 5. 如需把图片、视频或附件保存到 Vault，安装并启用 `Clipper Attachment Bridge`，填写配套插件地址和配对令牌后点击“测试连接”

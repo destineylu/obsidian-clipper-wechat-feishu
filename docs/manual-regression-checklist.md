@@ -40,6 +40,16 @@ Run this checklist after syncing from the official Obsidian Web Clipper or chang
    - A new configuration should default videos and large files to links.
 6. Save through a daily-note append or prepend behavior.
    - Every image, video, and file bridge marker should fall back to a source-document link.
+7. Open a direct `https://<tenant>.feishu.cn/sheets/<test-spreadsheet>` URL.
+   - The selected sheet should render as a bounded HTML/Markdown table.
+   - A truncation notice and source link should remain when the sheet exceeds the preview limit.
+8. Open a direct `https://<tenant>.feishu.cn/base/<test-bitable>` URL and a Wiki node whose `obj_type` is `bitable`.
+   - Field names and records should render without `[object Object]`.
+   - Missing permissions should produce an explicit warning and source link instead of an empty clipping.
+9. Clip a Docx containing embedded Sheet, Bitable, task, and unsupported blocks.
+   - Embedded spreadsheet tokens must be split into SpreadsheetToken and SheetID.
+   - Embedded Bitable tokens must be split into app_token and table_id.
+   - Task and unknown blocks must remain visible as capability/permission fallbacks.
 
 ## Bilibili Reader
 

@@ -1,9 +1,22 @@
 import browser from './browser-polyfill';
 import { processUrls } from './string-utils';
 import { debugLog } from './debug';
+import {
+	renderFeishuBitableResource,
+	renderFeishuSheetResource,
+	renderUnsupportedFeishuResource,
+} from './feishu-resource-renderer';
+import {
+	fetchBitableResourcePreview,
+	fetchSheetResourcePreview,
+	getFeishuResourceErrorReason,
+	parseEmbeddedBitableToken,
+	parseEmbeddedSheetToken,
+	withoutTopLevelResourceHeading,
+} from './feishu-resource-adapters';
 
 export interface FeishuParsedUrl {
-	type: 'wiki' | 'docx' | 'doc' | null;
+	type: 'wiki' | 'docx' | 'doc' | 'sheet' | 'bitable' | null;
 	token: string | null;
 }
 
@@ -69,6 +82,10 @@ interface FeishuEmbedBlock {
 	name?: string;
 }
 
+interface FeishuTokenBlock {
+	token?: string;
+}
+
 interface FeishuBlock {
 	block_id: string;
 	parent_id?: string;
@@ -102,6 +119,13 @@ interface FeishuBlock {
 	iframe?: FeishuEmbedBlock;
 	widget?: FeishuEmbedBlock;
 	chat_card?: FeishuEmbedBlock;
+	bitable?: FeishuTokenBlock;
+	sheet?: FeishuTokenBlock;
+	task?: { task_id?: string };
+	okr?: { okr_id?: string; objectives?: Array<{ objective_id?: string; kr_ids?: string[] }> };
+	okr_objective?: { content?: FeishuTextBody };
+	okr_key_result?: { content?: FeishuTextBody };
+	okr_progress?: object;
 	view?: object;
 	undefined_block?: object;
 }
@@ -123,6 +147,7 @@ interface FeishuRenderContext {
 	openApiHost: string;
 	objType: string;
 	domMedia: FeishuDomMedia;
+	resourcePreviewCache: Map<string, Promise<string>>;
 }
 
 const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -144,7 +169,7 @@ function redactFeishuIdentifier(value: string | null | undefined): string {
 function redactFeishuUrl(value: string): string {
 	try {
 		const parsed = new URL(value);
-		const type = parsed.pathname.match(/^\/(wiki|docx|docs?)(?:\/|$)/)?.[1] || 'api';
+		const type = parsed.pathname.match(/^\/(wiki|docx|docs?|sheets|base)(?:\/|$)/)?.[1] || 'api';
 		return `https://<feishu-host>/${type}/<redacted>`;
 	} catch {
 		return '[invalid-url]';
@@ -168,6 +193,7 @@ const FEISHU_BLOCK_TYPE = {
 	CODE: 14,
 	QUOTE: 15,
 	TODO: 17,
+	BITABLE: 18,
 	CALLOUT: 19,
 	CHAT_CARD: 20,
 	DIAGRAM: 21,
@@ -184,6 +210,11 @@ const FEISHU_BLOCK_TYPE = {
 	TABLE_CELL: 32,
 	VIEW: 33,
 	QUOTE_CONTAINER: 34,
+	TASK: 35,
+	OKR: 36,
+	OKR_OBJECTIVE: 37,
+	OKR_KEY_RESULT: 38,
+	OKR_PROGRESS: 39,
 } as const;
 
 export function isFeishuDocUrl(url: string): boolean {
@@ -191,7 +222,7 @@ export function isFeishuDocUrl(url: string): boolean {
 		const parsed = new URL(url);
 		const isFeishuHost = parsed.hostname.endsWith('.feishu.cn') || parsed.hostname.endsWith('.larksuite.com');
 		if (!isFeishuHost) return false;
-		return /^\/(wiki|docx|docs?)\/[\w-]+/.test(parsed.pathname);
+		return /^\/(wiki|docx|docs?|sheets|base)\/[\w-]+/.test(parsed.pathname);
 	} catch {
 		return false;
 	}
@@ -213,10 +244,18 @@ export function isAllowedFeishuDirectMediaUrl(url: string): boolean {
 export function parseFeishuUrl(url: string): FeishuParsedUrl {
 	try {
 		const parsed = new URL(url);
-		const match = parsed.pathname.match(/^\/(wiki|docx|docs?)\/([\w-]+)/);
+		const match = parsed.pathname.match(/^\/(wiki|docx|docs?|sheets|base)\/([\w-]+)/);
 		if (!match) return { type: null, token: null };
 		const rawType = match[1];
-		const normalizedType = (rawType === 'docs' ? 'doc' : rawType) as 'wiki' | 'docx' | 'doc';
+		const normalizedType = (
+			rawType === 'docs'
+				? 'doc'
+				: rawType === 'sheets'
+					? 'sheet'
+					: rawType === 'base'
+						? 'bitable'
+						: rawType
+		) as Exclude<FeishuParsedUrl['type'], null>;
 		return {
 			type: normalizedType,
 			token: match[2],
@@ -294,8 +333,8 @@ export async function fetchFeishuMediaAsDataUrl(
 	};
 }
 
-async function resolveDocumentId(parsedUrl: FeishuParsedUrl): Promise<{ documentId: string; objType: string } | null> {
-	if (!parsedUrl.token) return null;
+async function resolveResource(parsedUrl: FeishuParsedUrl): Promise<{ resourceId: string; objType: string } | null> {
+	if (!parsedUrl.token || !parsedUrl.type) return null;
 
 	if (parsedUrl.type === 'wiki') {
 		const result = await fetchFeishuApi(
@@ -309,10 +348,13 @@ async function resolveDocumentId(parsedUrl: FeishuParsedUrl): Promise<{ document
 			});
 			return null;
 		}
-		return { documentId: node.obj_token, objType: node.obj_type || 'docx' };
+		return { resourceId: node.obj_token, objType: node.obj_type || 'docx' };
 	}
 
-	return { documentId: parsedUrl.token, objType: parsedUrl.type === 'doc' ? 'doc' : 'docx' };
+	return {
+		resourceId: parsedUrl.token,
+		objType: parsedUrl.type === 'doc' ? 'doc' : parsedUrl.type,
+	};
 }
 
 async function fetchAllBlocks(documentId: string): Promise<FeishuBlock[]> {
@@ -417,6 +459,8 @@ function getTextBody(block: FeishuBlock): FeishuTextBody | undefined {
 		case FEISHU_BLOCK_TYPE.QUOTE: return block.quote;
 		case FEISHU_BLOCK_TYPE.TODO: return block.todo;
 		case FEISHU_BLOCK_TYPE.CALLOUT: return block.callout;
+		case FEISHU_BLOCK_TYPE.OKR_OBJECTIVE: return block.okr_objective?.content;
+		case FEISHU_BLOCK_TYPE.OKR_KEY_RESULT: return block.okr_key_result?.content;
 		default: return undefined;
 	}
 }
@@ -730,16 +774,108 @@ function extractEmbedUrl(block: FeishuBlock): string | null {
 	return candidates.find(isSafeMediaUrl) || null;
 }
 
+function renderUnsupportedBlock(
+	block: FeishuBlock,
+	context: FeishuRenderContext,
+	label = '飞书复杂对象',
+	reason = '当前对象无法完整转换'
+): string {
+	debugLog('Feishu', 'Rendered unsupported block fallback', {
+		blockType: block.block_type,
+		documentUrl: redactFeishuUrl(context.documentUrl),
+		reason,
+	});
+	return [
+		'<blockquote class="feishu-unsupported-block">',
+		`<p><strong>${escapeHtml(label)}</strong>：${escapeHtml(reason)}。</p>`,
+		`<p><a href="${escapeAttr(context.documentUrl)}">在飞书中打开此对象</a></p>`,
+		'</blockquote>',
+	].join('');
+}
+
 function renderEmbedBlock(block: FeishuBlock, context: FeishuRenderContext): string {
-	const embedUrl = extractEmbedUrl(block) || context.domMedia.embeds.shift() || context.documentUrl;
+	const embedUrl = extractEmbedUrl(block) || context.domMedia.embeds.shift() || null;
 	const title = block.iframe?.title || block.widget?.title || block.chat_card?.title || block.iframe?.name || block.widget?.name || block.chat_card?.name || 'Open embedded content';
+	if (!embedUrl) {
+		return renderUnsupportedBlock(block, context, title, '未提供可独立访问的嵌入地址');
+	}
 	if (/\.(mp4|mov|m4v|webm|ogg|ogv)(\?|#|$)/i.test(embedUrl)) {
 		return buildVideoHtml(embedUrl, { title });
 	}
 	if (/^https?:/i.test(embedUrl)) {
 		return `<figure><iframe src="${escapeAttr(embedUrl)}" loading="lazy" allowfullscreen></iframe><figcaption><a href="${escapeAttr(embedUrl)}">${escapeHtml(title)}</a></figcaption></figure>`;
 	}
-	return `<p><a href="${escapeAttr(context.documentUrl)}">${escapeHtml(title)}</a></p>`;
+	return renderUnsupportedBlock(block, context, title, '嵌入地址格式不受支持');
+}
+
+function renderEmbeddedSheetBlock(block: FeishuBlock, context: FeishuRenderContext): Promise<string> {
+	const token = block.sheet?.token?.trim();
+	if (!token) {
+		return Promise.resolve(renderUnsupportedBlock(block, context, '飞书电子表格', '块中没有可用的电子表格标识'));
+	}
+	const parsed = parseEmbeddedSheetToken(token);
+	const cacheKey = `sheet:${parsed.spreadsheetToken}:${parsed.sheetId || ''}`;
+	const cached = context.resourcePreviewCache.get(cacheKey);
+	if (cached) return cached;
+
+	const preview = fetchSheetResourcePreview(
+		fetchFeishuApi,
+		parsed.spreadsheetToken,
+		context.documentUrl,
+		'',
+		parsed.sheetId
+	)
+		.then(resource => withoutTopLevelResourceHeading(
+			renderFeishuSheetResource(
+				resource.title,
+				context.documentUrl,
+				resource.sheets,
+				resource.omittedSheetCount
+			).content
+		))
+		.catch(error => renderUnsupportedBlock(
+			block,
+			context,
+			'飞书电子表格',
+			getFeishuResourceErrorReason(error)
+		));
+	context.resourcePreviewCache.set(cacheKey, preview);
+	return preview;
+}
+
+function renderEmbeddedBitableBlock(block: FeishuBlock, context: FeishuRenderContext): Promise<string> {
+	const token = block.bitable?.token?.trim();
+	if (!token) {
+		return Promise.resolve(renderUnsupportedBlock(block, context, '飞书多维表格', '块中没有可用的多维表格标识'));
+	}
+	const parsed = parseEmbeddedBitableToken(token);
+	const cacheKey = `bitable:${parsed.appToken}:${parsed.tableId || ''}`;
+	const cached = context.resourcePreviewCache.get(cacheKey);
+	if (cached) return cached;
+
+	const preview = fetchBitableResourcePreview(
+		fetchFeishuApi,
+		parsed.appToken,
+		context.documentUrl,
+		'',
+		parsed.tableId
+	)
+		.then(resource => withoutTopLevelResourceHeading(
+			renderFeishuBitableResource(
+				resource.title,
+				context.documentUrl,
+				resource.tables,
+				resource.omittedTableCount
+			).content
+		))
+		.catch(error => renderUnsupportedBlock(
+			block,
+			context,
+			'飞书多维表格',
+			getFeishuResourceErrorReason(error)
+		));
+	context.resourcePreviewCache.set(cacheKey, preview);
+	return preview;
 }
 
 async function convertBlocksToHtml(blocks: FeishuBlock[], context: FeishuRenderContext): Promise<string> {
@@ -942,7 +1078,9 @@ async function renderBlock(block: FeishuBlock, blockMap: Map<string, FeishuBlock
 
 		case FEISHU_BLOCK_TYPE.IMAGE: {
 			const src = resolveImageSource(block, context);
-			if (!src) return '';
+			if (!src) {
+				return renderUnsupportedBlock(block, context, '飞书图片', '未返回可用的图片标识或地址');
+			}
 			return buildImageHtml(src, {
 				alt: block.image?.title,
 				width: block.image?.width,
@@ -953,8 +1091,10 @@ async function renderBlock(block: FeishuBlock, blockMap: Map<string, FeishuBlock
 		case FEISHU_BLOCK_TYPE.FILE:
 			return renderFileBlock(block, context);
 
-		case FEISHU_BLOCK_TYPE.VIEW:
-			return renderBlockChildren(block, blockMap, context);
+		case FEISHU_BLOCK_TYPE.VIEW: {
+			const children = await renderBlockChildren(block, blockMap, context);
+			return children || renderUnsupportedBlock(block, context, '飞书预览对象', '预览块没有返回可转换的子内容');
+		}
 
 		case FEISHU_BLOCK_TYPE.TABLE:
 			return renderTable(block, blockMap, context);
@@ -963,28 +1103,76 @@ async function renderBlock(block: FeishuBlock, blockMap: Map<string, FeishuBlock
 		case FEISHU_BLOCK_TYPE.GRID_COLUMN:
 			return renderBlockChildren(block, blockMap, context);
 
+		case FEISHU_BLOCK_TYPE.BITABLE:
+			return renderEmbeddedBitableBlock(block, context);
+
+		case FEISHU_BLOCK_TYPE.SHEET:
+			return renderEmbeddedSheetBlock(block, context);
+
+		case FEISHU_BLOCK_TYPE.TASK:
+			return renderUnsupportedBlock(
+				block,
+				context,
+				'飞书任务卡片',
+				block.task?.task_id
+					? '已识别任务，但完整详情需要用户 OAuth 与 task:task:read 权限'
+					: '任务块没有返回可读取的任务标识'
+			);
+
+		case FEISHU_BLOCK_TYPE.OKR: {
+			const children = await renderBlockChildren(block, blockMap, context);
+			return children || renderUnsupportedBlock(block, context, '飞书 OKR', 'OKR 详情需要用户身份权限');
+		}
+
+		case FEISHU_BLOCK_TYPE.OKR_OBJECTIVE: {
+			const content = renderTextElements(block.okr_objective?.content?.elements);
+			const children = await renderBlockChildren(block, blockMap, context);
+			return content || children
+				? `<section class="feishu-okr-objective">${content ? `<h3>${content}</h3>` : ''}${children}</section>`
+				: renderUnsupportedBlock(block, context, '飞书 OKR 目标', '目标内容不可见或未授权');
+		}
+
+		case FEISHU_BLOCK_TYPE.OKR_KEY_RESULT: {
+			const content = renderTextElements(block.okr_key_result?.content?.elements);
+			const children = await renderBlockChildren(block, blockMap, context);
+			return content || children
+				? `<section class="feishu-okr-key-result">${content ? `<p>${content}</p>` : ''}${children}</section>`
+				: renderUnsupportedBlock(block, context, '飞书 OKR 关键结果', '关键结果内容不可见或未授权');
+		}
+
+		case FEISHU_BLOCK_TYPE.OKR_PROGRESS:
+			return renderUnsupportedBlock(block, context, '飞书 OKR 进展', '进展详情无法完整转换');
+
 		case FEISHU_BLOCK_TYPE.IFRAME:
 		case FEISHU_BLOCK_TYPE.WIDGET:
-		case FEISHU_BLOCK_TYPE.SHEET:
 		case FEISHU_BLOCK_TYPE.MINDNOTE:
 		case FEISHU_BLOCK_TYPE.DIAGRAM:
 		case FEISHU_BLOCK_TYPE.CHAT_CARD:
 			return renderEmbedBlock(block, context);
 
 		default:
-			return '';
+			return renderUnsupportedBlock(
+				block,
+				context,
+				`飞书对象（块类型 ${block.block_type}）`,
+				'此版本尚未识别该块类型'
+			);
 	}
 }
 
 async function renderTable(block: FeishuBlock, blockMap: Map<string, FeishuBlock>, context: FeishuRenderContext): Promise<string> {
 	const table = block.table;
-	if (!table?.property) return '';
+	if (!table?.property) {
+		return renderUnsupportedBlock(block, context, '飞书表格', '表格结构不完整');
+	}
 
 	const rowSize = table.property.row_size || 0;
 	const colSize = table.property.column_size || 0;
 	const cellIds = block.children || [];
 
-	if (!rowSize || !colSize || !cellIds.length) return '';
+	if (!rowSize || !colSize || !cellIds.length) {
+		return renderUnsupportedBlock(block, context, '飞书表格', '表格没有可转换的行列数据');
+	}
 
 	const rows: string[] = [];
 	for (let r = 0; r < rowSize; r++) {
@@ -1132,23 +1320,112 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 		return null;
 	}
 
-	const resolved = await resolveDocumentId(parsedUrl);
+	const resolved = await resolveResource(parsedUrl);
 	if (!resolved) {
-		debugLog('Feishu', 'Failed to resolve document ID', {
+		debugLog('Feishu', 'Failed to resolve resource ID', {
 			token: redactFeishuIdentifier(parsedUrl.token),
 			type: parsedUrl.type,
 		});
 		return null;
 	}
 
+	if (resolved.objType === 'sheet') {
+		try {
+			const preview = await fetchSheetResourcePreview(
+				fetchFeishuApi,
+				resolved.resourceId,
+				doc.URL,
+				doc.title || '飞书电子表格'
+			);
+			const rendered = renderFeishuSheetResource(
+				preview.title,
+				doc.URL,
+				preview.sheets,
+				preview.omittedSheetCount
+			);
+			return {
+				title: preview.title,
+				author: '',
+				content: processUrls(rendered.content, new URL(doc.URL)),
+				wordCount: rendered.wordCount,
+			};
+		} catch (error) {
+			const fallback = renderUnsupportedFeishuResource(
+				'sheet',
+				doc.URL,
+				doc.title || '飞书电子表格',
+				getFeishuResourceErrorReason(error)
+			);
+			return {
+				title: doc.title || '飞书电子表格',
+				author: '',
+				content: fallback.content,
+				wordCount: fallback.wordCount,
+			};
+		}
+	}
+
+	if (resolved.objType === 'bitable') {
+		try {
+			const preview = await fetchBitableResourcePreview(
+				fetchFeishuApi,
+				resolved.resourceId,
+				doc.URL,
+				doc.title || '飞书多维表格'
+			);
+			const rendered = renderFeishuBitableResource(
+				preview.title,
+				doc.URL,
+				preview.tables,
+				preview.omittedTableCount
+			);
+			return {
+				title: preview.title,
+				author: '',
+				content: processUrls(rendered.content, new URL(doc.URL)),
+				wordCount: rendered.wordCount,
+			};
+		} catch (error) {
+			const fallback = renderUnsupportedFeishuResource(
+				'bitable',
+				doc.URL,
+				doc.title || '飞书多维表格',
+				getFeishuResourceErrorReason(error)
+			);
+			return {
+				title: doc.title || '飞书多维表格',
+				author: '',
+				content: fallback.content,
+				wordCount: fallback.wordCount,
+			};
+		}
+	}
+
+	if (resolved.objType !== 'docx' && resolved.objType !== 'doc') {
+		const fallback = renderUnsupportedFeishuResource(
+			resolved.objType,
+			doc.URL,
+			doc.title || '飞书复杂对象',
+			resolved.objType === 'task'
+				? '任务卡片需要用户身份授权，当前仅保留原始入口'
+				: undefined
+		);
+		return {
+			title: doc.title || '飞书复杂对象',
+			author: '',
+			content: fallback.content,
+			wordCount: fallback.wordCount,
+		};
+	}
+
 	const [blocks, meta] = await Promise.all([
-		fetchAllBlocks(resolved.documentId),
-		fetchDocumentMeta(resolved.documentId),
+		fetchAllBlocks(resolved.resourceId),
+		fetchDocumentMeta(resolved.resourceId),
 	]);
 
 	if (!blocks.length) {
 		debugLog('Feishu', 'No blocks returned for document', {
-			documentId: redactFeishuIdentifier(resolved.documentId),
+			documentId: redactFeishuIdentifier(resolved.resourceId),
 		});
 		return null;
 	}
@@ -1158,11 +1435,12 @@ export async function extractFeishuStructuredContent(doc: Document): Promise<Fei
 		openApiHost: getFeishuOpenApiHost(doc.URL),
 		objType: resolved.objType,
 		domMedia: collectFeishuDomMedia(doc),
+		resourcePreviewCache: new Map(),
 	};
 
 	debugLog('Feishu', 'Document structure summary', {
 		url: redactFeishuUrl(doc.URL),
-		documentId: redactFeishuIdentifier(resolved.documentId),
+		documentId: redactFeishuIdentifier(resolved.resourceId),
 		objType: resolved.objType,
 		blockTypes: summarizeBlockTypes(blocks),
 		domImages: context.domMedia.images.length,
