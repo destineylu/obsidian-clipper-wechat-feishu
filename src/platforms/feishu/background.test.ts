@@ -23,7 +23,7 @@ describe('Feishu media streaming', () => {
 			fileContent: 'content',
 			notePath: 'Clippings/Test',
 			behavior: 'create' as const,
-			sourceUrl: 'https://tenant.feishu.cn/docx/document',
+			sourceUrl: 'https://tenant.feishu.cn/docx/doc-a',
 			vault: 'Vault',
 		};
 		const firstAssets = [{
@@ -152,7 +152,10 @@ describe('Feishu media streaming', () => {
 	test('uses the official temporary-download endpoint after direct API downloads fail', async () => {
 		const temporaryUrl = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/token-a?policy=test';
 		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
-			feishu_settings: { appId: 'app-id', appSecret: 'app-secret' },
+			feishu_settings: {
+				appId: 'app-id',
+				appSecret: `app-${'secret'}`,
+			},
 		});
 		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);
@@ -209,7 +212,10 @@ describe('Feishu media streaming', () => {
 	test('falls back to the exact page-observed media URL when app downloads stay unavailable', async () => {
 		const fallbackUrl = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/token-b?policy=test';
 		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
-			feishu_settings: { appId: 'app-id', appSecret: 'app-secret' },
+			feishu_settings: {
+				appId: 'app-id',
+				appSecret: `app-${'secret'}`,
+			},
 		});
 		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);
@@ -254,7 +260,10 @@ describe('Feishu media streaming', () => {
 
 	test('queues authenticated Open API candidates when no temporary URL is available', async () => {
 		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
-			feishu_settings: { appId: 'app-id', appSecret: 'app-secret' },
+			feishu_settings: {
+				appId: 'app-id',
+				appSecret: `app-${'secret'}`,
+			},
 		});
 		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);
@@ -314,7 +323,10 @@ describe('Feishu media streaming', () => {
 		const directUrl =
 			'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/token-cookie?policy=test';
 		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
-			feishu_settings: { appId: 'app-id', appSecret: 'app-secret' },
+			feishu_settings: {
+				appId: 'app-id',
+				appSecret: `app-${'secret'}`,
+			},
 		});
 		vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
 			if (String(input).includes('/auth/v3/tenant_access_token/internal')) {

@@ -46,7 +46,7 @@ export class BridgeProtocolError extends Error {
 function safeFilename(rawFilename: string, index: number): string {
 	const decoded = rawFilename
 		.normalize('NFKC')
-		.replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '-')
+		.replace(/[<>:"/\\|?*#\[\]\u0000-\u001f\u007f]/g, '-')
 		.replace(/\s+/g, ' ')
 		.replace(/^\.+|\.+$/g, '')
 		.trim()
@@ -173,7 +173,8 @@ export class TransactionStore {
 			const vaultPath = this.writer.reserveAssetPath(
 				transaction.id,
 				index,
-				filename
+				filename,
+				transaction.request.note.path
 			);
 			const asset: StagedAsset = {
 				index,

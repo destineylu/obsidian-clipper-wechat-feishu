@@ -72,8 +72,11 @@ interface RuntimeSession {
 	directory: string;
 	queue: Map<number, FeishuBridgeRemoteAssetRequest>;
 	controllers: Map<number, AbortController>;
+	retryUntil: Map<number, number>;
 	running: Promise<void> | null;
 	persisting: Promise<void>;
+	transferStartedAt: number | null;
+	transferStartedBytes: number;
 }
 
 type DownloadImplementation = (
@@ -82,13 +85,10 @@ type DownloadImplementation = (
 
 const TRANSIENT_DOWNLOAD_RETRY_DELAYS_MS = [
 	1_000,
-	3_000,
-	8_000,
-	15_000,
-	30_000,
 ];
 const DOWNLOAD_START_INTERVAL_MS = 250;
 const FEISHU_RATE_LIMIT_MINIMUM_DELAY_MS = 5_000;
+const ASSET_DOWNLOAD_BUDGET_MS = 3 * 60_000;
 const STRINGIFIED_READABLE_STREAM_SHA256 =
 	'7559c3628a54a498b715edbbb9a0f16fc65e94eaaf185b41e91f6bddf1a8e02e';
 
@@ -154,7 +154,7 @@ function cleanError(error: unknown): string {
 function safeFilename(rawFilename: string, index: number): string {
 	const filename = rawFilename
 		.normalize('NFKC')
-		.replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '-')
+		.replace(/[<>:"/\\|?*#\[\]\u0000-\u001f\u007f]/g, '-')
 		.replace(/\s+/g, ' ')
 		.replace(/^\.+|\.+$/g, '')
 		.trim()
@@ -407,6 +407,12 @@ export class ResumableSessionStore {
 			}
 			session.queue.set(descriptor.index, descriptor);
 		}
+		if (!session.running) {
+			session.transferStartedAt = Date.now();
+			session.transferStartedBytes = session.manifest.assets
+				.filter(asset => asset.state === 'completed')
+				.reduce((sum, asset) => sum + asset.byteLength, 0);
+		}
 		session.manifest.phase = 'downloading';
 		this.touch(session);
 		await this.persist(session);
@@ -511,13 +517,23 @@ export class ResumableSessionStore {
 						descriptor.downloadUrl,
 						...(descriptor.fallbackDownloadUrls || []),
 					];
+					const downloadDeadline =
+						Date.now() + ASSET_DOWNLOAD_BUDGET_MS;
 					let lastError: unknown;
+					downloadCandidates:
 					for (const url of candidateUrls) {
 						for (
 							let attempt = 0;
 							attempt <= TRANSIENT_DOWNLOAD_RETRY_DELAYS_MS.length;
 							attempt += 1
 						) {
+							if (Date.now() >= downloadDeadline) {
+								lastError = new RemoteMediaDownloadError(
+									'remote_download_timeout',
+									'单个飞书媒体下载超过 3 分钟，已停止重试'
+								);
+								break downloadCandidates;
+							}
 							try {
 								await this.waitForDownloadStart(
 									controller.signal
@@ -545,6 +561,13 @@ export class ResumableSessionStore {
 								lastError = error;
 								asset.byteLength = 0;
 								if (controller.signal.aborted) throw error;
+								if (Date.now() >= downloadDeadline) {
+									lastError = new RemoteMediaDownloadError(
+										'remote_download_timeout',
+										'单个飞书媒体下载超过 3 分钟，已停止重试'
+									);
+									break downloadCandidates;
+								}
 								if (
 									attempt >= TRANSIENT_DOWNLOAD_RETRY_DELAYS_MS.length ||
 									!isTransientDownloadError(error)
@@ -564,10 +587,31 @@ export class ResumableSessionStore {
 								if (rateLimited) {
 									this.postponeDownloadStarts(retryDelay);
 								}
-								await waitForRetry(
+								const boundedRetryDelay = Math.min(
 									retryDelay,
-									controller.signal
+									Math.max(0, downloadDeadline - Date.now())
 								);
+								if (boundedRetryDelay <= 0) {
+									lastError = new RemoteMediaDownloadError(
+										'remote_download_timeout',
+										'单个飞书媒体下载超过 3 分钟，已停止重试'
+									);
+									break downloadCandidates;
+								}
+								session.retryUntil.set(
+									index,
+									Date.now() + boundedRetryDelay
+								);
+								this.touch(session);
+								await this.persist(session);
+								try {
+									await waitForRetry(
+										boundedRetryDelay,
+										controller.signal
+									);
+								} finally {
+									session.retryUntil.delete(index);
+								}
 							}
 						}
 						if (result) break;
@@ -601,7 +645,8 @@ export class ResumableSessionStore {
 				const vaultPath = this.writer.reserveAssetPath(
 					session.manifest.id,
 					index,
-					filename
+					filename,
+					session.manifest.note.path
 				);
 				Object.assign(asset, {
 					state: 'completed' as const,
@@ -619,6 +664,7 @@ export class ResumableSessionStore {
 				asset.error = cleanError(error);
 				await rm(tempPath, { force: true }).catch(() => undefined);
 			} finally {
+				session.retryUntil.delete(index);
 				session.controllers.delete(index);
 				this.touch(session);
 				await this.persist(session);
@@ -726,7 +772,8 @@ export class ResumableSessionStore {
 			asset.vaultPath = this.writer.reserveAssetPath(
 				session.manifest.id,
 				asset.index,
-				asset.filename
+				asset.filename,
+				session.manifest.note.path
 			);
 		}
 	}
@@ -740,8 +787,13 @@ export class ResumableSessionStore {
 			directory,
 			queue: new Map(),
 			controllers: new Map(),
+			retryUntil: new Map(),
 			running: null,
 			persisting: Promise.resolve(),
+			transferStartedAt: null,
+			transferStartedBytes: manifest.assets
+				.filter(asset => asset.state === 'completed')
+				.reduce((sum, asset) => sum + asset.byteLength, 0),
 		};
 	}
 
@@ -858,6 +910,7 @@ export class ResumableSessionStore {
 
 	private status(session: RuntimeSession): FeishuBridgeSessionStatus {
 		const needsRedownload = this.completedSessionNeedsRedownload(session);
+		const now = Date.now();
 		const assets = session.manifest.assets.map(asset => ({
 			index: asset.index,
 			kind: asset.kind,
@@ -881,6 +934,25 @@ export class ResumableSessionStore {
 				asset => asset.sha256 === STRINGIFIED_READABLE_STREAM_SHA256
 			).length
 			: 0;
+		const downloadedBytes = assets.reduce(
+			(sum, asset) => sum + asset.byteLength,
+			0
+		);
+		const retryDeadlines = [...session.retryUntil.values()]
+			.filter(deadline => deadline > now);
+		const activeAssets = assets.filter(
+			asset => asset.state === 'downloading'
+		).length;
+		const elapsedSeconds = session.transferStartedAt === null
+			? 0
+			: Math.max(0, (now - session.transferStartedAt) / 1_000);
+		const transferredBytes = Math.max(
+			0,
+			downloadedBytes - session.transferStartedBytes
+		);
+		const bytesPerSecond = elapsedSeconds > 0 && transferredBytes > 0
+			? transferredBytes / elapsedSeconds
+			: undefined;
 		return {
 			sessionId: session.manifest.id,
 			phase,
@@ -892,11 +964,22 @@ export class ResumableSessionStore {
 				assets.filter(asset => asset.state === 'failed').length,
 				knownCorruptAssets
 			),
-			downloadedBytes: assets.reduce(
-				(sum, asset) => sum + asset.byteLength,
-				0
-			),
+			downloadedBytes,
 			...(expectedBytes > 0 ? { totalBytes: expectedBytes } : {}),
+			isTotalBytesFinal: assets.every(
+				asset => asset.state === 'completed'
+			),
+			activeAssets,
+			retryingAssets: retryDeadlines.length,
+			...(retryDeadlines.length
+				? {
+					retryAfterMs: Math.max(
+						0,
+						Math.min(...retryDeadlines) - now
+					),
+				}
+				: {}),
+			...(bytesPerSecond !== undefined ? { bytesPerSecond } : {}),
 			assets,
 			...(session.manifest.notePath
 				? { notePath: session.manifest.notePath }

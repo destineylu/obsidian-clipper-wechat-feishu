@@ -70,7 +70,7 @@ describe('Feishu attachment bridge transfer', () => {
 			].join('\n'),
 			notePath: 'Inbox/Test.md',
 			behavior: 'create',
-			sourceUrl: 'https://tenant.feishu.cn/docx/private-document-token',
+			sourceUrl: 'https://tenant.feishu.cn/docx/doc-a',
 			vault: 'My Vault',
 		}, dependencies);
 
@@ -108,7 +108,7 @@ describe('Feishu attachment bridge transfer', () => {
 			fileContent: '![图](feishu-bridge://image/token-a)',
 			notePath: 'Inbox/Test.md',
 			behavior: 'create',
-			sourceUrl: 'https://tenant.feishu.cn/docx/document',
+			sourceUrl: 'https://tenant.feishu.cn/docx/doc-b',
 			vault: 'My Vault',
 		}, dependencies)).rejects.toThrow('download failed');
 		expect(dependencies.client.abortTransaction).toHaveBeenCalledWith(
@@ -124,7 +124,7 @@ describe('Feishu attachment bridge transfer', () => {
 			fileContent: '![图](feishu-bridge://image/token-a)',
 			notePath: 'Inbox/Test.md',
 			behavior: 'create',
-			sourceUrl: 'https://tenant.feishu.cn/docx/document',
+			sourceUrl: 'https://tenant.feishu.cn/docx/doc-c',
 			vault: 'Another Vault',
 		}, dependencies)).rejects.toThrow('Vault');
 		expect(dependencies.client.createTransaction).not.toHaveBeenCalled();
@@ -222,7 +222,7 @@ describe('Feishu attachment bridge transfer', () => {
 			].join('\n'),
 			notePath: 'Inbox/Test.md',
 			behavior: 'create',
-			sourceUrl: 'https://tenant.feishu.cn/docx/private-document',
+			sourceUrl: 'https://tenant.feishu.cn/docx/doc-d',
 			vault: 'My Vault',
 		}, {
 			client: dependencies.client,

@@ -659,6 +659,12 @@
 	"feishuBridgeRetryHint": {
 		"message": "再次点击“添加到 Obsidian”即可继续"
 	},
+	"feishuBridgeTotalCalculating": {
+		"message": "总大小计算中"
+	},
+	"feishuBridgeRetryingAssets": {
+		"message": "$1 个附件正在等待重试"
+	},
 	"properties": {
 		"message": "属性"
 	},

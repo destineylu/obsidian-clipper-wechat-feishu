@@ -783,6 +783,7 @@ async function publishFeishuBridgeProgress(
 	const progress = await saveFeishuBridgeProgress(sourceUrl, status);
 	await browser.runtime.sendMessage({
 		action: 'feishuBridgeProgress',
+		sourceUrl,
 		progress,
 	}).catch(() => undefined);
 }

@@ -48,7 +48,8 @@ export class E2eFilesystemWriter implements BridgeTransactionWriter {
 	reserveAssetPath(
 		transactionId: string,
 		index: number,
-		filename: string
+		filename: string,
+		notePath: string
 	): string {
 		const safeFilename = safeRelativePath(filename);
 		if (safeFilename.includes('/')) {
@@ -58,11 +59,15 @@ export class E2eFilesystemWriter implements BridgeTransactionWriter {
 		const stem = safeFilename.slice(0, safeFilename.length - extension.length);
 		const suffix =
 			transactionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'asset';
+		const noteFolder = safeRelativePath(notePath)
+			.split('/')
+			.pop()!
+			.replace(/\.md$/i, '');
 		let counter = 0;
 		let relativePath = '';
 		do {
 			relativePath = safeRelativePath(
-				`${this.attachmentFolder}/${stem}-${suffix}-${index}${
+				`${this.attachmentFolder}/${noteFolder}/${stem}-${suffix}-${index}${
 					counter ? `-${counter}` : ''
 				}${extension}`
 			);

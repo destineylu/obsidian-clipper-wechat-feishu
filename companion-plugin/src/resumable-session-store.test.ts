@@ -102,7 +102,7 @@ describe('resumable companion sessions', () => {
 					: 'video/mp4',
 				sha256: 'b'.repeat(64),
 				...(options.destination.endsWith('0.part')
-					? { suggestedFilename: 'server-mislabeled.jpeg' }
+					? { suggestedFilename: 'server#[mislabeled].jpeg' }
 					: {}),
 			};
 		});
@@ -145,10 +145,13 @@ describe('resumable companion sessions', () => {
 			failedAssets: 0,
 			downloadedBytes: 2,
 			totalBytes: 8,
+			isTotalBytesFinal: true,
+			activeAssets: 0,
+			retryingAssets: 0,
 			notePath: 'Clippings/Test.md',
 		});
 		expect(committed[0].content).toContain(
-			'![[Attachments/Web Clipper/0-server-mislabeled.png|封面]]'
+			'![[Attachments/Web Clipper/0-server--mislabeled-.png|封面]]'
 		);
 		expect(committed[0].content).toContain(
 			'![[Attachments/Web Clipper/1-demo.mp4]]'

@@ -39,7 +39,8 @@ export interface BridgeTransactionWriter {
 	reserveAssetPath(
 		transactionId: string,
 		index: number,
-		filename: string
+		filename: string,
+		notePath: string
 	): string;
 	commit(
 		transaction: BridgeTransaction,

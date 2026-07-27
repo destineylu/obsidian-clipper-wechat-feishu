@@ -659,6 +659,12 @@
 	"feishuBridgeRetryHint": {
 		"message": "Click Add to Obsidian again to resume"
 	},
+	"feishuBridgeTotalCalculating": {
+		"message": "Total size calculating"
+	},
+	"feishuBridgeRetryingAssets": {
+		"message": "$1 attachment(s) waiting to retry"
+	},
 	"properties": {
 		"message": "Properties"
 	},

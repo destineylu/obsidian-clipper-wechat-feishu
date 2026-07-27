@@ -40,6 +40,19 @@ function splitExtension(filename: string): { stem: string; extension: string } {
 	};
 }
 
+function attachmentFolderForNote(rawNotePath: string): string {
+	const normalizedPath = rawNotePath.replace(/\\/g, '/').trim();
+	const rawName = normalizedPath.split('/').pop()?.replace(/\.md$/i, '') || '';
+	const safeName = rawName
+		.normalize('NFKC')
+		.replace(/[<>:"/\\|?*#\[\]\u0000-\u001f\u007f]/g, '-')
+		.replace(/\s+/g, ' ')
+		.replace(/^\.+|\.+$/g, '')
+		.trim()
+		.slice(0, 100);
+	return safeName || '未命名笔记';
+}
+
 export class ObsidianVaultWriter implements BridgeTransactionWriter {
 	private readonly attachmentFolder: string;
 	private readonly reservations = new Map<string, Set<string>>();
@@ -63,9 +76,13 @@ export class ObsidianVaultWriter implements BridgeTransactionWriter {
 	reserveAssetPath(
 		transactionId: string,
 		index: number,
-		filename: string
+		filename: string,
+		notePath: string
 	): string {
-		const safeFilename = normalizeSafeVaultPath(filename, '附件文件名');
+		const safeFilename = normalizeSafeVaultPath(
+			filename.replace(/[#\[\]]/g, '-'),
+			'附件文件名'
+		);
 		if (safeFilename.includes('/')) {
 			throw new Error('附件文件名无效');
 		}
@@ -73,11 +90,12 @@ export class ObsidianVaultWriter implements BridgeTransactionWriter {
 		const transactionSuffix =
 			transactionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'asset';
 		const baseName = `${stem}-${transactionSuffix}-${index}`;
+		const noteFolder = attachmentFolderForNote(notePath);
 		let suffix = 0;
 		let path = '';
 		do {
 			const candidate = `${baseName}${suffix ? `-${suffix}` : ''}${extension}`;
-			path = `${this.attachmentFolder}/${candidate}`;
+			path = `${this.attachmentFolder}/${noteFolder}/${candidate}`;
 			suffix += 1;
 		} while (
 			this.app.vault.getAbstractFileByPath(path) ||

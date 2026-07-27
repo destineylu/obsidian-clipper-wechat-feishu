@@ -104,7 +104,8 @@ describe('ObsidianVaultWriter', () => {
 		const vaultPath = writer.reserveAssetPath(
 			'transaction-12345678',
 			0,
-			'image.png'
+			'image.png',
+			'Inbox/Test.md'
 		);
 		const transaction: BridgeTransaction = {
 			id: 'transaction-12345678',
@@ -135,6 +136,9 @@ describe('ObsidianVaultWriter', () => {
 			activeAssetIndexes: new Set(),
 		};
 
+		expect(vaultPath).toBe(
+			'Attachments/Web Clipper/Test/image-transact-0.png'
+		);
 		await expect(writer.commit(
 			transaction,
 			`# Final\n\n![[${vaultPath}]]`
@@ -148,6 +152,7 @@ describe('ObsidianVaultWriter', () => {
 		expect(fake.folders).toEqual(new Set([
 			'Attachments',
 			'Attachments/Web Clipper',
+			'Attachments/Web Clipper/Test',
 			'Inbox',
 		]));
 	});
@@ -161,5 +166,19 @@ describe('ObsidianVaultWriter', () => {
 
 		const writer = new ObsidianVaultWriter(fake.app, settings);
 		expect(() => writer.validateNotePath('../outside.md')).toThrow('笔记路径');
+	});
+
+	test('sanitizes Markdown-sensitive characters in attachment filenames', () => {
+		const fake = createFakeApp();
+		const writer = new ObsidianVaultWriter(fake.app, settings);
+
+		expect(writer.reserveAssetPath(
+			'transaction-12345678',
+			2,
+			'## scene [01].mp4',
+			'Clippings/教程 #1 [测试].md'
+		)).toBe(
+			'Attachments/Web Clipper/教程 -1 -测试-/-- scene -01--transact-2.mp4'
+		);
 	});
 });

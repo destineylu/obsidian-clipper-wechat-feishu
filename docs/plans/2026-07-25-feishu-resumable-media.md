@@ -155,6 +155,6 @@
    `git diff --check`.
 3. Reinstall and enable the companion build in the approved Vault.
 4. Attach only to `http://127.0.0.1:19222`; never launch another browser.
-5. Clip `https://my.feishu.cn/docx/IKO3dWCeyobZ5CxWE18cV40xnth`.
+5. Clip `https://tenant.feishu.cn/docx/<public-test-document-id>`.
 6. Verify 269 image markers and 11 video/file markers become existing local Vault
    attachments, the note contains no Base64/private markers, and interruption resumes.

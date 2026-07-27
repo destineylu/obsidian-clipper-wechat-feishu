@@ -1211,7 +1211,7 @@ function buildXVideoSection(candidate: XVideoCandidate): string {
 		'<section data-obsidian-clipper-x-video="true">',
 		'<h2>X 视频</h2>',
 		`<video controls preload="metadata"${candidate.poster ? ` poster="${escapeHtml(candidate.poster)}"` : ''} src="${escapeHtml(candidate.url)}"></video>`,
-		`<p><a href="${escapeHtml(candidate.url)}">X视频未内联：下载/打开视频</a></p>`,
+		`<p><a href="${escapeHtml(candidate.url)}">视频无法播放时：下载/打开原文件</a></p>`,
 	];
 	if (candidate.poster) {
 		lines.push(`<p><a href="${escapeHtml(candidate.url)}"><img src="${escapeHtml(candidate.poster)}" alt="X视频封面"></a></p>`);
@@ -1220,8 +1220,28 @@ function buildXVideoSection(candidate: XVideoCandidate): string {
 	return lines.join('');
 }
 
+function selectXVideoDisplayCandidates(candidates: XVideoCandidate[]): XVideoCandidate[] {
+	const uniqueCandidates = dedupeCandidates(candidates);
+	const candidatesWithPoster = uniqueCandidates.filter(candidate => !!candidate.poster);
+	if (candidatesWithPoster.length === 0) {
+		const best = chooseBestCandidate(uniqueCandidates);
+		return best ? [best] : [];
+	}
+
+	const byPoster = new Map<string, XVideoCandidate[]>();
+	for (const candidate of candidatesWithPoster) {
+		const key = candidate.poster || candidate.id;
+		const group = byPoster.get(key) || [];
+		group.push(candidate);
+		byPoster.set(key, group);
+	}
+	return Array.from(byPoster.values())
+		.map(group => chooseBestCandidate(group))
+		.filter((candidate): candidate is XVideoCandidate => !!candidate);
+}
+
 function insertXVideoSections(content: string, candidates: XVideoCandidate[], tweetUrl?: string): string {
-	return dedupeCandidates(candidates).reduce((nextContent, candidate) => {
+	return selectXVideoDisplayCandidates(candidates).reduce((nextContent, candidate) => {
 		if (!candidate.url || nextContent.includes(candidate.url)) return nextContent;
 		return insertXVideoSectionNearTweetMedia(nextContent, buildXVideoSection(candidate), tweetUrl, candidate);
 	}, content);

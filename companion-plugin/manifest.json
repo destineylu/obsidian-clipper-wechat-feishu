@@ -1,7 +1,7 @@
 {
 	"id": "clipper-attachment-bridge",
 	"name": "Clipper Attachment Bridge",
-	"version": "0.2.9",
+	"version": "0.2.11",
 	"minAppVersion": "1.6.0",
 	"description": "Streams and resumes Web Clipper images, videos, and files into the current vault without Base64.",
 	"author": "destineylu",

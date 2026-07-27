@@ -136,6 +136,11 @@ export interface FeishuBridgeSessionStatus {
 	failedAssets: number;
 	downloadedBytes: number;
 	totalBytes?: number;
+	isTotalBytesFinal?: boolean;
+	activeAssets?: number;
+	retryingAssets?: number;
+	retryAfterMs?: number;
+	bytesPerSecond?: number;
 	assets: FeishuBridgeSessionAssetStatus[];
 	notePath?: string;
 	error?: string;

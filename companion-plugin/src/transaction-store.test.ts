@@ -57,6 +57,12 @@ describe('TransactionStore', () => {
 			byteLength: 4,
 			vaultPath: 'Attachments/0-image.png',
 		});
+		expect(writer.reserveAssetPath).toHaveBeenCalledWith(
+			transaction.id,
+			0,
+			'image.png',
+			'Inbox/Test.md'
+		);
 		expect(existsSync(transaction.tempDirectory)).toBe(true);
 
 		await expect(store.commit(transaction.id, '# Final')).resolves.toEqual({

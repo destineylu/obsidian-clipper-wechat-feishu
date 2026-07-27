@@ -11,9 +11,35 @@ export interface FeishuBridgeStoredProgress {
 	failedAssets: number;
 	downloadedBytes: number;
 	totalBytes?: number;
+	isTotalBytesFinal?: boolean;
+	activeAssets?: number;
+	retryingAssets?: number;
+	retryAfterMs?: number;
+	bytesPerSecond?: number;
 	notePath?: string;
 	error?: string;
 	updatedAt: string;
+}
+
+function sourceIdentity(rawUrl: string): string {
+	try {
+		const url = new URL(rawUrl);
+		url.hash = '';
+		return url.toString();
+	} catch {
+		return rawUrl;
+	}
+}
+
+export function isFeishuBridgeProgressForSource(
+	currentSourceUrl: string,
+	progressSourceUrl: string
+): boolean {
+	return (
+		Boolean(currentSourceUrl) &&
+		Boolean(progressSourceUrl) &&
+		sourceIdentity(currentSourceUrl) === sourceIdentity(progressSourceUrl)
+	);
 }
 
 export function isFeishuBridgeSessionActive(
@@ -70,6 +96,21 @@ export function redactFeishuBridgeProgress(
 		downloadedBytes: status.downloadedBytes,
 		...(status.totalBytes !== undefined
 			? { totalBytes: status.totalBytes }
+			: {}),
+		...(status.isTotalBytesFinal !== undefined
+			? { isTotalBytesFinal: status.isTotalBytesFinal }
+			: {}),
+		...(status.activeAssets !== undefined
+			? { activeAssets: status.activeAssets }
+			: {}),
+		...(status.retryingAssets !== undefined
+			? { retryingAssets: status.retryingAssets }
+			: {}),
+		...(status.retryAfterMs !== undefined
+			? { retryAfterMs: status.retryAfterMs }
+			: {}),
+		...(status.bytesPerSecond !== undefined
+			? { bytesPerSecond: status.bytesPerSecond }
 			: {}),
 		...(status.notePath ? { notePath: status.notePath } : {}),
 		...(error ? { error: error.slice(0, 300) } : {}),

@@ -25,7 +25,11 @@ import { translatePage, getMessage, setupLanguageAndDirection } from '../utils/i
 import { formatPropertyValue } from '../utils/shared';
 import { platformRegistry } from '../platforms';
 import { createSingleFlight } from '../utils/single-flight';
-import { isFeishuBridgeSessionActive } from '../platforms/feishu/bridge-progress';
+import {
+	isFeishuBridgeProgressForSource,
+	isFeishuBridgeSessionActive,
+} from '../platforms/feishu/bridge-progress';
+import { countNoteContentMedia } from './content-status';
 
 interface ReaderModeResponse {
 	success: boolean;
@@ -68,6 +72,11 @@ interface FeishuBridgeProgress {
 	failedAssets: number;
 	downloadedBytes: number;
 	totalBytes?: number;
+	isTotalBytesFinal?: boolean;
+	activeAssets?: number;
+	retryingAssets?: number;
+	retryAfterMs?: number;
+	bytesPerSecond?: number;
 	notePath?: string;
 	error?: string;
 	updatedAt: string;
@@ -148,21 +157,38 @@ function renderFeishuBridgeProgress(progress: FeishuBridgeProgress): void {
 			break;
 	}
 
-	const byteSummary = progress.totalBytes && progress.totalBytes > 0
+	const byteSummary = progress.isTotalBytesFinal &&
+		progress.totalBytes &&
+		progress.totalBytes > 0
 		? `${formatBridgeBytes(progress.downloadedBytes)} / ${formatBridgeBytes(progress.totalBytes)}`
-		: formatBridgeBytes(progress.downloadedBytes);
+		: [
+			formatBridgeBytes(progress.downloadedBytes),
+			getMessage('feishuBridgeTotalCalculating'),
+		].join(' · ');
+	const speedSummary = progress.bytesPerSecond && progress.bytesPerSecond > 0
+		? `${formatBridgeBytes(progress.bytesPerSecond)}/s`
+		: '';
+	const retrySummary = progress.retryingAssets && progress.retryingAssets > 0
+		? getMessage(
+			'feishuBridgeRetryingAssets',
+			new Intl.NumberFormat().format(progress.retryingAssets)
+		)
+		: '';
+	const liveSummary = [byteSummary, speedSummary, retrySummary]
+		.filter(Boolean)
+		.join(' · ');
 	if (progress.phase === 'failed') {
 		detail.textContent = progress.error
 			? `${progress.error} · ${getMessage('feishuBridgeRetryHint')}`
 			: getMessage('feishuBridgeRetryHint');
 	} else if (progress.phase === 'waiting') {
-		detail.textContent = byteSummary
-			? `${byteSummary} · ${getMessage('feishuBridgeRetryHint')}`
+		detail.textContent = liveSummary
+			? `${liveSummary} · ${getMessage('feishuBridgeRetryHint')}`
 			: getMessage('feishuBridgeRetryHint');
 	} else if (progress.phase === 'completed') {
 		detail.textContent = progress.notePath || byteSummary;
 	} else {
-		detail.textContent = byteSummary;
+		detail.textContent = liveSummary;
 	}
 
 	if (progress.phase === 'completed') {
@@ -210,18 +236,6 @@ function getVariablesCacheKey(variables: { [key: string]: string }): string {
 	return hashString(JSON.stringify(sortedEntries));
 }
 
-function countMarkdownImages(content: string): number {
-	return content.match(/!\[[^\]]*]\([^)]*\)/g)?.length || 0;
-}
-
-function countLinkedImages(content: string): number {
-	return (content.match(/Feishu图片(?:附件)?未内联|飞书图片(?:附件)?未内联/g) || []).length;
-}
-
-function countMediaLinks(content: string): number {
-	return (content.match(/微信视频|微信音频|Feishu视频|飞书视频|X视频|视频未内联|音频未内联/g) || []).length;
-}
-
 function updateNoteContentStatus(content: string): void {
 	const status = document.getElementById('note-content-status');
 	if (!status) return;
@@ -233,14 +247,22 @@ function updateNoteContentStatus(content: string): void {
 
 	const numberFormatter = new Intl.NumberFormat();
 	const textLength = content.replace(/\s+/g, '').length;
-	const imageCount = countMarkdownImages(content) + countLinkedImages(content);
-	const mediaCount = countMediaLinks(content);
+	const {
+		imageCount,
+		bridgeAttachmentCount,
+		mediaLinkCount,
+	} = countNoteContentMedia(content);
 	const parts = [
 		`已提取 ${numberFormatter.format(textLength)} 字`,
 		`${numberFormatter.format(imageCount)} 张图片`,
 	];
-	if (mediaCount > 0) {
-		parts.push(`${numberFormatter.format(mediaCount)} 个媒体链接`);
+	if (bridgeAttachmentCount > 0) {
+		parts.push(
+			`${numberFormatter.format(bridgeAttachmentCount)} 个视频或附件`
+		);
+	}
+	if (mediaLinkCount > 0) {
+		parts.push(`${numberFormatter.format(mediaLinkCount)} 个媒体链接`);
 	}
 	status.textContent = parts.join(' · ');
 }
@@ -547,7 +569,18 @@ function setupMessageListeners() {
 		} else if (request.action === "highlighterModeChanged") {
 			// This message is now handled by checkHighlighterModeState
 		} else if (request.action === 'feishuBridgeProgress' && request.progress) {
-			renderFeishuBridgeProgress(request.progress as FeishuBridgeProgress);
+			if (
+				preparedPageContext &&
+				typeof request.sourceUrl === 'string' &&
+				isFeishuBridgeProgressForSource(
+					preparedPageContext.url,
+					request.sourceUrl
+				)
+			) {
+				renderFeishuBridgeProgress(
+					request.progress as FeishuBridgeProgress
+				);
+			}
 		}
 	});
 }

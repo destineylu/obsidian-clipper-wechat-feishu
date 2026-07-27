@@ -18,6 +18,17 @@ function portableFeishuBridgeLinks(markdown: string, sourceUrl: string): string 
 	);
 }
 
+function portableFeishuAttachmentLinks(
+	markdown: string,
+	sourceUrl: string
+): string {
+	return markdown.replace(
+		/!?\[([^\]]*)\]\(feishu-bridge:\/\/(?:video|file)\/[^)]+\)/g,
+		(_match, alt: string) =>
+			`[${alt || '飞书视频或附件'}](${sourceUrl})`
+	);
+}
+
 function buildNotePath(path: string, noteName: string): string {
 	const folder = path
 		.replace(/\\/g, '/')
@@ -27,13 +38,26 @@ function buildNotePath(path: string, noteName: string): string {
 	return folder ? `${folder}/${name}` : name;
 }
 
+function largeAttachmentConfirmMessage(attachmentCount: number): string {
+	const formattedCount = new Intl.NumberFormat('zh-CN').format(
+		attachmentCount
+	);
+	return [
+		`本次剪藏包含 ${formattedCount} 个视频或大附件。下载可能较慢，并占用较多 Vault 空间。`,
+		'',
+		'点击“确定”：下载到 Obsidian',
+		'点击“取消”：视频/附件保留飞书链接，仅将图片保存到本地（推荐）',
+	].join('\n');
+}
+
 export async function saveFeishuToObsidian(
 	context: PlatformObsidianSaveContext
 ): Promise<PlatformObsidianSaveResult | null> {
 	if (!isFeishuDocUrl(context.url)) return null;
 	const settings = await loadPlatformSettings();
 	if (!isFeishuBridgeEnabled(settings.feishu)) return null;
-	if (!extractFeishuBridgeAssets(context.fileContent).length) return null;
+	const initialAssets = extractFeishuBridgeAssets(context.fileContent);
+	if (!initialAssets.length) return null;
 
 	if (
 		context.behavior === 'append-daily' ||
@@ -48,12 +72,32 @@ export async function saveFeishuToObsidian(
 		};
 	}
 
+	let fileContent = context.fileContent;
+	const attachmentCount = initialAssets.filter(
+		asset => asset.kind !== 'image'
+	).length;
+	if (
+		attachmentCount > 0 &&
+		!confirm(largeAttachmentConfirmMessage(attachmentCount))
+	) {
+		fileContent = portableFeishuAttachmentLinks(
+			fileContent,
+			context.url
+		);
+		if (!extractFeishuBridgeAssets(fileContent).length) {
+			return {
+				handled: false,
+				fileContent,
+			};
+		}
+	}
+
 	const notePath = buildNotePath(context.path, context.noteName);
 	if (!notePath) throw new Error('Obsidian 笔记名称不能为空');
 	const response = await browser.runtime.sendMessage({
 		action: 'saveFeishuWithBridge',
 		input: {
-			fileContent: context.fileContent,
+			fileContent,
 			notePath,
 			behavior: context.behavior,
 			sourceUrl: context.url,
