@@ -241,6 +241,32 @@ export function isAllowedFeishuDirectMediaUrl(url: string): boolean {
 	}
 }
 
+function rejectedFeishuDirectMediaHostname(url: string): string | null {
+	try {
+		const parsedUrl = new URL(url);
+		const hostname = parsedUrl.hostname.toLowerCase();
+		if (
+			hostname === 'open.feishu.cn' ||
+			hostname === 'open.larksuite.com'
+		) {
+			return null;
+		}
+		const isFeishuOrLarkHost =
+			hostname.endsWith('.feishu.cn') ||
+			hostname.endsWith('.feishucdn.com') ||
+			hostname.endsWith('.larksuite.com') ||
+			hostname.endsWith('.larksuitecdn.com');
+		if (!isFeishuOrLarkHost) return null;
+		return /(?:imfile|drive|stream|media|file|cdn)/i.test(
+			`${hostname}${parsedUrl.pathname}`
+		)
+			? hostname
+			: null;
+	} catch {
+		return null;
+	}
+}
+
 export function parseFeishuUrl(url: string): FeishuParsedUrl {
 	try {
 		const parsed = new URL(url);
@@ -607,8 +633,17 @@ export function collectFeishuDirectMediaUrlsByToken(
 	resourceUrls: Iterable<string>
 ): Map<string, string> {
 	const urlsByToken = new Map<string, string>();
+	const rejectedHostnames = new Set<string>();
+	let rejectedResourceCount = 0;
 	for (const resourceUrl of resourceUrls) {
-		if (!isAllowedFeishuDirectMediaUrl(resourceUrl)) continue;
+		if (!isAllowedFeishuDirectMediaUrl(resourceUrl)) {
+			const hostname = rejectedFeishuDirectMediaHostname(resourceUrl);
+			if (hostname) {
+				rejectedHostnames.add(hostname);
+				rejectedResourceCount += 1;
+			}
+			continue;
+		}
 		try {
 			const parsedUrl = new URL(resourceUrl);
 			const pathSegments = parsedUrl.pathname.split('/').filter(Boolean);
@@ -620,6 +655,12 @@ export function collectFeishuDirectMediaUrlsByToken(
 		} catch {
 			// Ignore malformed or unsupported resource entries.
 		}
+	}
+	if (rejectedHostnames.size > 0) {
+		debugLog('Feishu', 'Rejected direct media hosts outside allowlist', {
+			hostnames: [...rejectedHostnames].sort(),
+			rejectedResourceCount,
+		});
 	}
 	return urlsByToken;
 }

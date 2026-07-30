@@ -10,6 +10,7 @@ import {
 	readFeishuBridgeBinaryResponse,
 	readFeishuMediaResponse,
 	resolveFeishuRemoteAssetRequests,
+	shouldUseFeishuResumableBridge,
 } from './background';
 
 afterEach(() => {
@@ -209,6 +210,111 @@ describe('Feishu media streaming', () => {
 		);
 	});
 
+	test('preserves and sanitizes a Feishu error envelope returned with HTTP 200', async () => {
+		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
+			feishu_settings: {
+				appId: 'app-id',
+				appSecret: `app-${'secret'}`,
+			},
+		});
+		vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.includes('/auth/v3/tenant_access_token/internal')) {
+				return new Response(JSON.stringify({
+					code: 0,
+					tenant_access_token: 'tenant-token',
+					expire: 7200,
+				}), {
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				});
+			}
+			if (url.includes('batch_get_tmp_download_url')) {
+				return new Response(JSON.stringify({
+					code: 99991672,
+					msg: 'Access denied for document doxcn123456789012345678901234 at https://tenant.feishu.cn/docx/private',
+				}), {
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				});
+			}
+			return new Response(null, { status: 403 });
+		}));
+
+		const error = await downloadFeishuBridgeAsset(
+			{
+				token: 'permission-denied-token',
+				alt: '受限图片',
+				downloadKind: 'image',
+			},
+			'https://tenant.feishu.cn/docx/example',
+			new AbortController().signal
+		).then(
+			() => undefined,
+			reason => reason as Error
+		);
+
+		expect(error?.message).toContain('飞书错误码 99991672');
+		expect(error?.message).toContain('Access denied for document <redacted-id>');
+		expect(error?.message).toContain('<redacted-url>');
+		expect(error?.message).not.toContain('doxcn123456789012345678901234');
+		expect(error?.message).not.toContain('tenant.feishu.cn/docx/private');
+	});
+
+	test('preserves the Open API error when the page fallback also fails', async () => {
+		const fallbackUrl =
+			'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/denied?policy=test';
+		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
+			feishu_settings: {
+				appId: 'app-id',
+				appSecret: `app-${'secret'}`,
+			},
+		});
+		vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.includes('/auth/v3/tenant_access_token/internal')) {
+				return new Response(JSON.stringify({
+					code: 0,
+					tenant_access_token: 'tenant-token',
+					expire: 7200,
+				}), {
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				});
+			}
+			if (url.includes('batch_get_tmp_download_url')) {
+				return new Response(JSON.stringify({
+					code: 99991672,
+					msg: 'no permission',
+				}), {
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				});
+			}
+			if (url === fallbackUrl) {
+				return new Response(null, { status: 403 });
+			}
+			return new Response(null, { status: 404 });
+		}));
+
+		const error = await downloadFeishuBridgeAsset(
+			{
+				token: 'fallback-denied-token',
+				alt: '受限图片',
+				fallbackUrl,
+				downloadKind: 'image',
+			},
+			'https://tenant.feishu.cn/docx/example',
+			new AbortController().signal
+		).then(
+			() => undefined,
+			reason => reason as Error
+		);
+
+		expect(error?.message).toContain('飞书页面媒体下载失败 (HTTP 403)');
+		expect(error?.message).toContain('飞书错误码 99991672: no permission');
+	});
+
 	test('falls back to the exact page-observed media URL when app downloads stay unavailable', async () => {
 		const fallbackUrl = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/token-b?policy=test';
 		vi.spyOn(browser.storage.local, 'get').mockResolvedValue({
@@ -363,5 +469,23 @@ describe('Feishu media streaming', () => {
 				'/open-apis/drive/v1/media/token-cookie/download'
 			),
 		]));
+	});
+
+	test('selects resumable transfer for a single image when the companion supports it', () => {
+		expect(shouldUseFeishuResumableBridge(
+			{
+				service: 'clipper-attachment-bridge',
+				protocolVersion: 1,
+				ready: true,
+				capabilities: ['resumable-remote-media-v1'],
+			},
+			[{
+				token: 'single-image',
+				alt: '封面',
+				occurrences: 1,
+				kind: 'image',
+				downloadKind: 'image',
+			}]
+		)).toBe(true);
 	});
 });

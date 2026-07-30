@@ -9,6 +9,10 @@ Amended on 2026-07-25 so that image storage and video/large-file storage are
 independent user choices. Resumable transfer applies only to categories selected for
 local storage.
 
+Amended on 2026-07-30 so that every locally saved media set uses a resumable session
+when the paired companion advertises support. The transaction protocol remains only
+as compatibility for older companion versions.
+
 ## Goal
 
 Save the selected Feishu images, videos, and file attachments into the active Obsidian
@@ -18,9 +22,9 @@ outside the transfer queue.
 
 ## Architecture
 
-The existing transaction protocol remains available for small image-only documents.
-Large or mixed-media documents use a resumable session advertised by the companion
-health response.
+The existing transaction protocol remains available for older companion versions.
+Current companions advertise a resumable session that is used for small image-only,
+large, and mixed-media documents alike.
 
 1. The extension converts Feishu image, video, and file placeholders into typed
    bridge markers.
@@ -58,10 +62,10 @@ health response.
 
 - Protocol version 1 stays unchanged.
 - `GET /v1/health` adds capability names and resumable limits.
-- Small image-only documents can continue using `/v1/transactions`.
-- New clients select resumable sessions when media includes video/file markers, when
-  the estimated total is large, or when the asset count exceeds the safe small-note
-  threshold.
+- Older companions without the resumable capability continue using
+  `/v1/transactions`; that compatibility path retries one transient download failure.
+- New clients select resumable sessions whenever the companion advertises the
+  capability, including for a single locally saved image.
 - Image mode and video/large-file mode are independent.
 - Link-only video/file placeholders become portable source-document links and never
   enter a bridge session.

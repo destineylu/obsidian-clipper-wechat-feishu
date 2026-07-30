@@ -117,6 +117,57 @@ describe('Feishu attachment bridge transfer', () => {
 		);
 	});
 
+	test('retries one transient legacy download before committing', async () => {
+		const dependencies = createDependencies();
+		vi.mocked(dependencies.downloadAsset)
+			.mockRejectedValueOnce(new Error('飞书图片下载失败 (HTTP 503)'))
+			.mockResolvedValueOnce({
+				body: new Uint8Array([0, 1, 2, 3]),
+				filename: 'image.png',
+				contentType: 'image/png',
+				byteLength: 4,
+			});
+		const retryDelay = vi.fn(async () => undefined);
+
+		await expect(transferFeishuNoteWithBridge({
+			fileContent: '![图](feishu-bridge://image/token-a)',
+			notePath: 'Inbox/Test.md',
+			behavior: 'create',
+			sourceUrl: 'https://tenant.feishu.cn/docx/retry',
+			vault: 'My Vault',
+		}, {
+			...dependencies,
+			retryDelay,
+		} as FeishuBridgeTransferDependencies)).resolves.toMatchObject({
+			notePath: 'Inbox/Test.md',
+		});
+		expect(dependencies.downloadAsset).toHaveBeenCalledTimes(2);
+		expect(retryDelay).toHaveBeenCalledOnce();
+	});
+
+	test('does not retry a permanent legacy download failure', async () => {
+		const dependencies = createDependencies();
+		vi.mocked(dependencies.downloadAsset).mockRejectedValue(
+			new Error(
+				'飞书开放平台媒体下载失败 (HTTP 403, 飞书错误码 99991672: no permission)'
+			)
+		);
+		const retryDelay = vi.fn(async () => undefined);
+
+		await expect(transferFeishuNoteWithBridge({
+			fileContent: '![图](feishu-bridge://image/token-a)',
+			notePath: 'Inbox/Test.md',
+			behavior: 'create',
+			sourceUrl: 'https://tenant.feishu.cn/docx/deny',
+			vault: 'My Vault',
+		}, {
+			...dependencies,
+			retryDelay,
+		} as FeishuBridgeTransferDependencies)).rejects.toThrow('HTTP 403');
+		expect(dependencies.downloadAsset).toHaveBeenCalledOnce();
+		expect(retryDelay).not.toHaveBeenCalled();
+	});
+
 	test('refuses to write into a different active vault', async () => {
 		const dependencies = createDependencies();
 

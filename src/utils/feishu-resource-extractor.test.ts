@@ -119,7 +119,7 @@ describe('Feishu complex resource extraction', () => {
 		});
 
 		const result = await extractFeishuStructuredContent(createDocument(
-			'https://example.feishu.cn/wiki/wiki-token',
+			'https://example.feishu.cn/wiki/wiki-id',
 			'知识库节点'
 		));
 
@@ -136,7 +136,7 @@ describe('Feishu complex resource extraction', () => {
 		});
 
 		const result = await extractFeishuStructuredContent(createDocument(
-			'https://example.feishu.cn/wiki/wiki-token',
+			'https://example.feishu.cn/wiki/wiki-id',
 			'项目任务'
 		));
 
@@ -162,7 +162,7 @@ describe('Feishu complex resource extraction', () => {
 
 	test('expands an embedded Sheet token and preserves task and unknown blocks', async () => {
 		mocks.sendMessage.mockImplementation(async (request: { url?: string }) => {
-			if (request.url?.includes('/docx/v1/documents/doc-token/blocks?')) {
+			if (request.url?.includes('/docx/v1/documents/doc-id/blocks?')) {
 				return {
 					success: true,
 					data: {
@@ -178,7 +178,7 @@ describe('Feishu complex resource extraction', () => {
 					},
 				};
 			}
-			if (request.url?.endsWith('/docx/v1/documents/doc-token')) {
+			if (request.url?.endsWith('/docx/v1/documents/doc-id')) {
 				return {
 					success: true,
 					data: { code: 0, data: { document: { title: '复杂文档' } } },
@@ -209,7 +209,7 @@ describe('Feishu complex resource extraction', () => {
 		});
 
 		const result = await extractFeishuStructuredContent(createHtmlDocument(
-			'https://example.feishu.cn/docx/doc-token',
+			'https://example.feishu.cn/docx/doc-id',
 			'页面标题'
 		));
 
