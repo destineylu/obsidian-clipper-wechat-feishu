@@ -23,26 +23,67 @@ By default Web Clipper attempts to intelligently extract only the main article c
 
 ## Capture an entire documentation site
 
-For Sphinx documentation sites, choose the visible **Clip entire
-documentation** action above **Add to Obsidian**, or use the same action in its
-menu. Web Clipper reads the
-site's version-local `searchindex.js`, shows the detected page count and output
-mode, and asks for confirmation before it fetches any chapter pages.
+Web Clipper can collect a Sphinx documentation site (for example, a site built
+with `sphinx` or `sphinx-rtd-theme`) from any page under that site's versioned
+documentation root.
 
-With the paired desktop **Clipper Attachment Bridge** plugin running, Web
-Clipper writes one Markdown note per chapter and creates
-`00 - Documentation index.md`. Web Clipper also reads common Sphinx navigation
-trees: the index uses nested Wiki links, child pages use matching subfolders,
-and merged output keeps page and in-page heading levels. When navigation markup
-is unavailable, hierarchy falls back to Sphinx `docname` paths. Notes with the
-same paths are overwritten so the documentation can be refreshed;
-unrelated notes and chapters that disappeared from the website are never
-deleted automatically.
+### Step-by-step
 
-If the companion plugin is not paired, unavailable, connected to a different
-Vault, or too old to advertise document-bundle support, Web Clipper saves one
-merged Markdown note through the normal clipping transport. The confirmation
-dialog identifies this fallback before collection starts.
+1. Open the documentation site in the browser. You can start from the home page
+   or from any chapter page.
+2. Open Web Clipper and wait for the page preview to finish. The extension
+   detects Sphinx pages by their documentation metadata; the action is not shown
+   on ordinary web pages.
+3. Click the small **▼** on the right side of the purple **Add to Obsidian**
+   button.
+4. Choose **Clip entire documentation** from the menu.
+5. Review the detected title, page count and save mode in the confirmation
+   dialog, then click **OK**. The progress panel reports discovery, collection
+   and writing separately.
+
+If the menu item is missing, refresh the documentation page and reopen the
+extension. The current page must be served over `http://` or `https://`, and its
+HTML must contain Sphinx metadata. Browser-internal pages, PDF viewers and
+ordinary sites are not supported by this action.
+
+### Where the notes go
+
+For chapter mode, install and pair the desktop **Clipper Attachment Bridge**
+plugin first. Web Clipper then writes one Markdown note per documentation page
+and creates `00 - Documentation index.md` in the selected Vault and folder.
+
+The index mirrors the site's navigation whenever possible:
+
+- nested sidebar entries become nested Wiki links;
+- navigation parent pages become folders for their child pages;
+- caption/group entries become folder headings even when they are not pages;
+- pages missing from the sidebar are placed under `Other pages`;
+- if the site has no readable sidebar, Sphinx `docname` paths are used as a
+  fallback hierarchy.
+
+For example, a sidebar such as `Guide → Install → Advanced` becomes:
+
+```text
+Documentation/
+├── 00 - Documentation index.md
+└── Guide/
+    └── Install/
+        └── Advanced.md
+```
+
+The index links to those notes with relative Obsidian Wiki links. Re-running the
+same collection overwrites notes with the same paths, so the documentation can
+be refreshed safely. It does not delete unrelated notes or pages that have
+disappeared from the website.
+
+### Merged-note fallback
+
+If the companion plugin is not paired, unavailable, connected to another Vault,
+or too old to advertise document-bundle support, the confirmation dialog shows
+**one merged Markdown note** instead of chapter mode. The note contains the
+whole site in navigation order. Page titles become heading levels, and headings
+inside each page are shifted underneath the page title without duplicating the
+same title.
 
 The initial implementation is limited to Sphinx sites, 100 source pages, three
 concurrent page requests, and 20 MiB of Markdown for chapter-folder writes.

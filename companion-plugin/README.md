@@ -24,5 +24,16 @@ npm run build:companion
 
 该插件仅支持 Obsidian Desktop。移动端继续使用普通链接，不启动本机服务。
 
+## 收藏整个说明文档
+
+安装并启用配套插件后，在浏览器打开 Sphinx 说明文档（例如
+`https://docs.datasette.io/en/stable/`），打开 Web Clipper，点击紫色
+**Add to Obsidian** 按钮右侧的 **▼**，再选择 **Clip entire documentation**。
+
+确认页面数和保存方式后，插件会按章节写入当前 Vault，并生成
+`00 - Documentation index.md`。索引会保留网站左侧目录的嵌套关系：子页面进入父页面文件夹，目录分组也会保留；无法从侧边栏读取层级时，会回退到 Sphinx 的页面路径。再次执行会覆盖相同路径的笔记，不会删除 Vault 中的其他笔记。
+
+如果没有运行或没有正确配对本插件，扩展仍会工作，但会降级为一篇合并的 Markdown 笔记。若菜单中没有该功能，请确认当前页面是 Sphinx 文档、已刷新页面，并重新打开扩展。
+
 完整安装、设置组合、迁移和故障处理见
 [飞书媒体保存指南](../docs/feishu-media-storage.md)。
