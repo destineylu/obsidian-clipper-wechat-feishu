@@ -33,13 +33,20 @@ import { countNoteContentMedia } from './content-status';
 import {
 	buildDocumentBundleOutput,
 	collectDocumentPages,
-	discoverSphinxDocumentation,
-	isLikelySphinxDocumentationHtml,
+	detectDocumentSourceKind,
+	discoverDocumentation,
+	DOCUMENT_BUNDLE_MERGED_MAX_PAGES,
 	type FetchTextResult,
 } from './document-bundle';
 import { loadPlatformSettings } from '../platforms/settings';
 import { FeishuBridgeClient } from '../platforms/feishu/bridge-client';
-import { DOCUMENT_BUNDLE_CAPABILITY } from '../platforms/feishu/bridge-protocol';
+import {
+	DOCUMENT_BUNDLE_CAPABILITY,
+	DOCUMENT_COLLECTION_BATCH_MAX_BYTES,
+	DOCUMENT_COLLECTION_BATCH_MAX_NOTES,
+	DOCUMENT_COLLECTION_CAPABILITY,
+	type DocumentCollectionNoteRequest,
+} from '../platforms/feishu/bridge-protocol';
 
 interface ReaderModeResponse {
 	success: boolean;
@@ -62,6 +69,7 @@ let lastFeishuBridgeProgress: FeishuBridgeProgress | null = null;
 let pageRefreshGeneration = 0;
 let preparedPageContext: { tabId: number; url: string; identity: string } | null =
 	null;
+let currentDocumentHtml = '';
 
 const isSidePanel = window.location.pathname.includes('side-panel.html');
 const urlParams = new URLSearchParams(window.location.search);
@@ -994,6 +1002,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 	const generation = ++pageRefreshGeneration;
 	if (currentTabId === tabId) {
 		preparedPageContext = null;
+		currentDocumentHtml = '';
 		setDocumentBundleAvailable(false);
 	}
 	const isCurrentRefresh = () =>
@@ -1049,8 +1058,9 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 		const extractedData = await extractionPromise;
 		if (!isCurrentRefresh()) return;
 		if (extractedData) {
+			currentDocumentHtml = extractedData.fullHtml || '';
 			setDocumentBundleAvailable(
-				isLikelySphinxDocumentationHtml(extractedData.fullHtml || '')
+				detectDocumentSourceKind(tab.url, currentDocumentHtml) !== null
 			);
 			const currentUrl = tab.url;
 
@@ -1921,6 +1931,7 @@ async function fetchDocumentationText(url: string): Promise<FetchTextResult> {
 async function findDocumentBundleClient(selectedVault: string): Promise<{
 	client: FeishuBridgeClient;
 	vaultName?: string;
+	resumable: boolean;
 } | null> {
 	const settings = await loadPlatformSettings();
 	const token = settings.feishu.bridgePairingToken.trim();
@@ -1931,12 +1942,41 @@ async function findDocumentBundleClient(selectedVault: string): Promise<{
 			pairingToken: token,
 		});
 		const health = await client.health();
-		if (!health.capabilities?.includes(DOCUMENT_BUNDLE_CAPABILITY)) return null;
+		const resumable = Boolean(health.capabilities?.includes(DOCUMENT_COLLECTION_CAPABILITY));
+		if (!resumable && !health.capabilities?.includes(DOCUMENT_BUNDLE_CAPABILITY)) return null;
 		if (selectedVault && health.vaultName && selectedVault !== health.vaultName) return null;
-		return { client, vaultName: health.vaultName };
+		return { client, vaultName: health.vaultName, resumable };
 	} catch {
 		return null;
 	}
+}
+
+function documentContentHash(content: string): string {
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < content.length; index += 1) {
+		hash ^= content.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function documentCollectionBatches(notes: DocumentCollectionNoteRequest[]): DocumentCollectionNoteRequest[][] {
+	const batches: DocumentCollectionNoteRequest[][] = [];
+	let batch: DocumentCollectionNoteRequest[] = [];
+	let bytes = 0;
+	for (const note of notes) {
+		const noteBytes = new TextEncoder().encode(note.content).byteLength;
+		if (noteBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) throw new Error('单篇文档超过配套插件的 10 MiB 批次限制');
+		if (batch.length >= DOCUMENT_COLLECTION_BATCH_MAX_NOTES || bytes + noteBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) {
+			batches.push(batch);
+			batch = [];
+			bytes = 0;
+		}
+		batch.push(note);
+		bytes += noteBytes;
+	}
+	if (batch.length) batches.push(batch);
+	return batches;
 }
 
 function triggerDocumentBundleFromUi(): void {
@@ -1961,23 +2001,28 @@ async function handleDocumentBundle(): Promise<void> {
 
 	try {
 		const prepared = await requirePreparedPageContext();
-		const manifest = await discoverSphinxDocumentation(
-			prepared.url,
-			fetchDocumentationText,
-			{
+		const manifest = await discoverDocumentation({
+			currentUrl: prepared.url,
+			currentHtml: currentDocumentHtml,
+			fetchText: fetchDocumentationText,
+			documentParser: {
 				parseFromString: (html, mimeType) => new DOMParser().parseFromString(
 					html,
 					mimeType as DOMParserSupportedType
 				),
-			}
-		);
+			},
+		});
 		const bundleClient = await findDocumentBundleClient(selectedVault);
+		if (manifest.pages.length > DOCUMENT_BUNDLE_MERGED_MAX_PAGES && !bundleClient?.resumable) {
+			throw new Error(getMessage('documentationCompanionRequired', String(manifest.pages.length)));
+		}
 		const mode = bundleClient
 			? getMessage('documentationChapterMode')
 			: getMessage('documentationMergedMode');
 		const confirmed = confirm(getMessage('clipDocumentationConfirm', [
 			manifest.title,
 			String(manifest.pages.length),
+			manifest.locale || 'und',
 			mode,
 		]));
 		if (!confirmed) {
@@ -1994,43 +2039,106 @@ async function handleDocumentBundle(): Promise<void> {
 		const propertyTypes = Object.fromEntries(
 			generalSettings.propertyTypes.map(property => [property.name, property.type])
 		);
-		const pages = await collectDocumentPages({
-			manifest,
-			template,
-			propertyTypes,
-			documentParser: {
-				parseFromString: (html, mimeType) => new DOMParser().parseFromString(
-					html,
-					mimeType as DOMParserSupportedType
-				),
-			},
-			fetchText: fetchDocumentationText,
-			onProgress: (completed, total, page) => updateDocumentBundleProgress({
-				label: getMessage('documentationCollecting'),
-				completed,
-				total,
-				detail: page.title,
-			}),
-		});
-		const output = buildDocumentBundleOutput({
-			manifest,
-			pages,
-			basePath,
-			collectedAt: new Date(),
-		});
-
-		updateDocumentBundleProgress({
-			label: getMessage('documentationWriting'),
-			completed: manifest.pages.length,
-			total: manifest.pages.length,
-			detail: bundleClient ? output.folderPath : output.mergedNoteName,
-		});
-		if (bundleClient) {
+		const documentParser = {
+			parseFromString: (html: string, mimeType: string) => new DOMParser().parseFromString(
+				html,
+				mimeType as DOMParserSupportedType
+			),
+		};
+		let savedNoteCount = manifest.pages.length + 1;
+		if (bundleClient?.resumable) {
+			const collectionId = manifest.collectionId || `${manifest.kind}-documentation`;
+			let collection = await bundleClient.client.createDocumentCollection({
+				collectionId,
+				title: manifest.title,
+				rootUrl: manifest.rootUrl,
+				locale: manifest.locale || 'und',
+				totalPages: manifest.pages.length,
+			});
+			const completed = collection.resumed ? new Set(collection.completedPageIds) : new Set<string>();
+			completed.delete('__index__');
+			const acceptedPageIds = new Set(completed);
+			const seenSourceUrls = new Set<string>();
+			const pendingPages = manifest.pages.filter(page => !completed.has(page.docname));
+			for (let offset = 0; offset < pendingPages.length; offset += 20) {
+				const chunk = pendingPages.slice(offset, offset + 20);
+				const pages = await collectDocumentPages({
+					manifest,
+					pages: chunk,
+					template,
+					propertyTypes,
+					documentParser,
+					fetchText: fetchDocumentationText,
+					seenSourceUrls,
+					onProgress: (chunkCompleted, _total, page) => updateDocumentBundleProgress({
+						label: getMessage('documentationCollecting'),
+						completed: completed.size + offset + chunkCompleted,
+						total: manifest.pages.length,
+						detail: page.title,
+					}),
+				});
+				for (const page of pages) acceptedPageIds.add(page.docname);
+				const output = buildDocumentBundleOutput({ manifest, pages, basePath });
+				const notes: DocumentCollectionNoteRequest[] = output.notes
+					.filter(note => !note.path.endsWith('/00 - Documentation index.md'))
+					.map(note => ({
+						...note,
+						pageId: note.pageId || note.path,
+						contentHash: documentContentHash(note.content),
+					}));
+				for (const batch of documentCollectionBatches(notes)) {
+					collection = await bundleClient.client.writeDocumentCollectionBatch(collectionId, { notes: batch });
+				}
+			}
+			const effectiveManifest = {
+				...manifest,
+				pages: manifest.pages.filter(page => acceptedPageIds.has(page.docname)),
+			};
+			collection = await bundleClient.client.createDocumentCollection({
+				collectionId,
+				title: manifest.title,
+				rootUrl: manifest.rootUrl,
+				locale: manifest.locale || 'und',
+				totalPages: effectiveManifest.pages.length,
+			});
+			const indexPages = effectiveManifest.pages.map(page => ({
+				...page,
+				noteName: page.title,
+				content: '',
+			}));
+			const indexOutput = buildDocumentBundleOutput({
+				manifest: effectiveManifest,
+				pages: indexPages,
+				basePath,
+				collectedAt: new Date(),
+				pathOverrides: collection.notePaths,
+			});
+			const indexNote = indexOutput.notes.find(note => note.path.endsWith('/00 - Documentation index.md'))!;
+			await bundleClient.client.writeDocumentCollectionBatch(collectionId, {
+				notes: [{
+					...indexNote,
+					pageId: '__index__',
+					contentHash: documentContentHash(indexNote.content),
+				}],
+			});
+			await bundleClient.client.completeDocumentCollection(collectionId, {
+				expectedPageIds: effectiveManifest.pages.map(page => page.docname),
+			});
+			savedNoteCount = effectiveManifest.pages.length + 1;
+		} else if (bundleClient) {
+			const pages = await collectDocumentPages({
+				manifest, template, propertyTypes, documentParser, fetchText: fetchDocumentationText,
+			});
+			const output = buildDocumentBundleOutput({ manifest, pages, basePath, collectedAt: new Date() });
 			await bundleClient.client.writeDocumentBundle({
 				behavior: 'overwrite',
 				notes: output.notes,
 			});
 		} else {
+			const pages = await collectDocumentPages({
+				manifest, template, propertyTypes, documentParser, fetchText: fetchDocumentationText,
+			});
+			const output = buildDocumentBundleOutput({ manifest, pages, basePath, collectedAt: new Date() });
 			await saveToObsidian(
 				output.mergedContent,
 				output.mergedNoteName,
@@ -2038,6 +2146,7 @@ async function handleDocumentBundle(): Promise<void> {
 				selectedVault,
 				'overwrite'
 			);
+			savedNoteCount = 1;
 		}
 		await incrementStat(
 			'addToObsidian',
@@ -2052,7 +2161,7 @@ async function handleDocumentBundle(): Promise<void> {
 			completed: manifest.pages.length,
 			total: manifest.pages.length,
 			detail: bundleClient
-				? getMessage('documentationSavedChapters', String(output.notes.length))
+				? getMessage('documentationSavedChapters', String(savedNoteCount))
 				: getMessage('documentationSavedMerged'),
 			completedState: true,
 		});

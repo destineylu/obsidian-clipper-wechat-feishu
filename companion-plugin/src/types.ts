@@ -1,6 +1,7 @@
 import type {
 	DocumentBundleWriteRequest,
 	DocumentBundleWriteResponse,
+	DocumentCollectionNoteRequest,
 	FeishuBridgeCommitResponse,
 	FeishuBridgeCreateTransactionRequest,
 	FeishuBridgeUploadAssetResponse,
@@ -52,7 +53,11 @@ export interface BridgeTransactionWriter {
 }
 
 export interface DocumentBundleWriter {
+	documentNoteExists(path: string): Promise<boolean>;
 	commitDocumentBundle(
 		request: DocumentBundleWriteRequest
+	): Promise<DocumentBundleWriteResponse>;
+	commitDocumentCollectionBatch(
+		notes: Array<DocumentCollectionNoteRequest & { ownedPath?: string }>
 	): Promise<DocumentBundleWriteResponse>;
 }

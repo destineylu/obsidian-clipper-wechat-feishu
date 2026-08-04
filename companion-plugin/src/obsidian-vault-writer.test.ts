@@ -216,4 +216,38 @@ describe('ObsidianVaultWriter', () => {
 		expect(fake.files.get('Docs/Existing.md')?.text).toBe('# Updated');
 		expect(fake.files.has('Docs/Created-before-failure.md')).toBe(false);
 	});
+
+	test('does not overwrite an unrelated note when a collection first claims a path', async () => {
+		const fake = createFakeApp();
+		await fake.vault.create('Docs/Guide.md', '# User note');
+		const writer = new ObsidianVaultWriter(fake.app, settings);
+
+		const first = await writer.commitDocumentCollectionBatch([{
+			pageId: 'guide',
+			path: 'Docs/Guide.md',
+			content: '# Generated v1',
+			contentHash: '12345678',
+		}]);
+		expect(first.notePaths).toEqual(['Docs/Guide-1.md']);
+		expect(fake.files.get('Docs/Guide.md')?.text).toBe('# User note');
+
+		await writer.commitDocumentCollectionBatch([{
+			pageId: 'guide',
+			path: 'Docs/Guide.md',
+			ownedPath: 'Docs/Guide-1.md',
+			content: '# Generated v2',
+			contentHash: 'abcdef12',
+		}]);
+		expect(fake.files.get('Docs/Guide-1.md')?.text).toBe('# Generated v2');
+	});
+
+	test('reserves unique paths across every note in the same collection batch', async () => {
+		const fake = createFakeApp();
+		await fake.vault.create('Docs/Guide.md', '# Existing');
+		const writer = new ObsidianVaultWriter(fake.app, settings);
+		await expect(writer.commitDocumentCollectionBatch([
+			{ pageId: 'a', path: 'Docs/Guide.md', content: 'A', contentHash: '12345678' },
+			{ pageId: 'b', path: 'Docs/Guide-1.md', content: 'B', contentHash: 'abcdef12' },
+		])).resolves.toEqual({ notePaths: ['Docs/Guide-1.md', 'Docs/Guide-1-1.md'] });
+	});
 });

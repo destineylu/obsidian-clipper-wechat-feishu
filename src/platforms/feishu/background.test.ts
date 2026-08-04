@@ -7,6 +7,7 @@ import {
 	downloadFeishuBridgeAsset,
 	hasFeishuBridgeUnauthorizedAssets,
 	isAllowedFeishuBridgeDirectMediaUrl,
+	publishFeishuBridgeFallbackCompletion,
 	readFeishuBridgeBinaryResponse,
 	readFeishuMediaResponse,
 	resolveFeishuRemoteAssetRequests,
@@ -19,6 +20,35 @@ afterEach(() => {
 });
 
 describe('Feishu media streaming', () => {
+	test('publishes a completed UI state after browser fallback saves the note', async () => {
+		const remove = vi.spyOn(browser.storage.local, 'remove')
+			.mockResolvedValue(undefined);
+		const sendMessage = vi.spyOn(browser.runtime, 'sendMessage')
+			.mockResolvedValue(undefined);
+
+		await publishFeishuBridgeFallbackCompletion(
+			'https://tenant.feishu.cn/docx/example',
+			{
+				notePath: 'Clippings/Example.md',
+				assetPaths: ['Attachments/one.png', 'Attachments/two.jpg'],
+			},
+			2
+		);
+
+		expect(remove).toHaveBeenCalledTimes(1);
+		expect(sendMessage).toHaveBeenCalledWith({
+			action: 'feishuBridgeProgress',
+			sourceUrl: 'https://tenant.feishu.cn/docx/example',
+			progress: expect.objectContaining({
+				phase: 'completed',
+				assetCount: 2,
+				completedAssets: 2,
+				failedAssets: 0,
+				notePath: 'Clippings/Example.md',
+			}),
+		});
+	});
+
 	test('keeps resume identity stable when only signed fallback URLs change', async () => {
 		const input = {
 			fileContent: 'content',
@@ -360,7 +390,7 @@ describe('Feishu media streaming', () => {
 		expect(result.byteLength).toBe(4);
 		expect(fetchMock).toHaveBeenCalledWith(
 			fallbackUrl,
-			expect.objectContaining({ credentials: 'omit' })
+			expect.objectContaining({ credentials: 'include' })
 		);
 	});
 

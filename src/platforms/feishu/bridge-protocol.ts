@@ -10,9 +10,12 @@ export const DEFAULT_FEISHU_BRIDGE_FILE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 export const DEFAULT_FEISHU_BRIDGE_SESSION_MAX_BYTES = 20 * 1024 * 1024 * 1024;
 export const FEISHU_BRIDGE_RESUMABLE_CAPABILITY = 'resumable-remote-media-v1';
 export const DOCUMENT_BUNDLE_CAPABILITY = 'document-bundle-v1';
+export const DOCUMENT_COLLECTION_CAPABILITY = 'document-bundle-resumable-v2';
 export const DOCUMENT_BUNDLE_MAX_PAGES = 100;
 export const DOCUMENT_BUNDLE_MAX_NOTES = DOCUMENT_BUNDLE_MAX_PAGES + 1;
 export const DOCUMENT_BUNDLE_MAX_BYTES = 20 * 1024 * 1024;
+export const DOCUMENT_COLLECTION_BATCH_MAX_NOTES = 50;
+export const DOCUMENT_COLLECTION_BATCH_MAX_BYTES = 10 * 1024 * 1024;
 
 export type FeishuBridgeSupportedBehavior = Extract<
 	Template['behavior'],
@@ -45,6 +48,36 @@ export interface DocumentBundleWriteRequest {
 
 export interface DocumentBundleWriteResponse {
 	notePaths: string[];
+}
+
+export interface DocumentCollectionCreateRequest {
+	collectionId: string;
+	title: string;
+	rootUrl: string;
+	locale: string;
+	totalPages: number;
+}
+
+export interface DocumentCollectionNoteRequest extends DocumentBundleNoteRequest {
+	pageId: string;
+	contentHash: string;
+}
+
+export interface DocumentCollectionBatchRequest {
+	notes: DocumentCollectionNoteRequest[];
+}
+
+export interface DocumentCollectionCompleteRequest {
+	expectedPageIds: string[];
+}
+
+export interface DocumentCollectionStatusResponse {
+	collectionId: string;
+	resumed: boolean;
+	totalPages: number;
+	completedPageIds: string[];
+	notePaths: Record<string, string>;
+	completed: boolean;
 }
 
 export interface FeishuBridgeCreateTransactionRequest {

@@ -308,4 +308,61 @@ describe('Feishu attachment bridge transfer', () => {
 		);
 	});
 
+	test('aborts a zero-byte resumable session when an older companion omits activeAssets', async () => {
+		const dependencies = createDependencies();
+		const stalledStatus = {
+			sessionId: 'session-stalled',
+			phase: 'downloading' as const,
+			assetCount: 1,
+			completedAssets: 0,
+			failedAssets: 0,
+			downloadedBytes: 0,
+			assets: [{
+				index: 0,
+				kind: 'image' as const,
+				state: 'downloading' as const,
+				byteLength: 0,
+			}],
+			updatedAt: new Date().toISOString(),
+		};
+		vi.mocked(dependencies.client.health).mockResolvedValue({
+			service: 'clipper-attachment-bridge',
+			protocolVersion: 1,
+			ready: true,
+			vaultName: 'My Vault',
+			capabilities: ['resumable-remote-media-v1'],
+		});
+		vi.mocked(dependencies.client.createSession).mockResolvedValue({
+			sessionId: 'session-stalled',
+			resumed: false,
+			status: { ...stalledStatus, phase: 'waiting', activeAssets: 0 },
+		});
+		vi.mocked(dependencies.client.queueSessionAssets).mockResolvedValue(stalledStatus);
+		vi.mocked(dependencies.client.getSessionStatus).mockResolvedValue(stalledStatus);
+
+		await expect(transferFeishuNoteWithResumableBridge({
+			fileContent: '![封面](feishu-bridge://image/image-token)',
+			notePath: 'Inbox/External.md',
+			behavior: 'create',
+			sourceUrl: 'https://tenant.feishu.cn/wiki/x',
+			vault: 'My Vault',
+		}, {
+			client: dependencies.client,
+			resolveAssets: async () => [{
+				index: 0,
+				kind: 'image',
+				filename: 'cover',
+				downloadUrl: 'https://s1-imfile.feishucdn.com/image',
+			}],
+			publishProgress: async () => undefined,
+			pollDelay: async () => undefined,
+			now: vi.fn().mockReturnValueOnce(0).mockReturnValue(25),
+			zeroProgressTimeoutMs: 20,
+		})).rejects.toThrow('切换到浏览器下载');
+		expect(dependencies.client.abortSession).toHaveBeenCalledWith(
+			'session-stalled',
+			expect.any(AbortSignal)
+		);
+	});
+
 });

@@ -13,12 +13,19 @@ import {
 	DOCUMENT_BUNDLE_CAPABILITY,
 	DOCUMENT_BUNDLE_MAX_BYTES,
 	DOCUMENT_BUNDLE_MAX_NOTES,
+	DOCUMENT_COLLECTION_BATCH_MAX_BYTES,
+	DOCUMENT_COLLECTION_BATCH_MAX_NOTES,
+	DOCUMENT_COLLECTION_CAPABILITY,
 	FEISHU_BRIDGE_PROTOCOL_VERSION,
 	FEISHU_BRIDGE_RESUMABLE_CAPABILITY,
 	type FeishuBridgeQueueAssetsRequest,
 	type DocumentBundleWriteRequest,
+	type DocumentCollectionBatchRequest,
+	type DocumentCollectionCreateRequest,
+	type DocumentCollectionCompleteRequest,
 } from '../../src/platforms/feishu/bridge-protocol';
 import type { DocumentBundleWriter } from './types';
+import type { DocumentCollectionStore } from './document-collection-store';
 import type { ResumableSessionStore } from './resumable-session-store';
 import {
 	BridgeProtocolError,
@@ -31,6 +38,7 @@ interface BridgeHttpServerOptions {
 	vaultName: string;
 	store: TransactionStore;
 	documentBundleWriter?: DocumentBundleWriter;
+	documentCollections?: Pick<DocumentCollectionStore, 'create' | 'writeBatch' | 'complete'>;
 	resumable?: {
 		store: Pick<
 			ResumableSessionStore,
@@ -91,6 +99,47 @@ function validateDocumentBundleRequest(body: unknown): DocumentBundleWriteReques
 		}
 	}
 	return request as DocumentBundleWriteRequest;
+}
+
+function validateDocumentCollectionBatch(body: unknown): DocumentCollectionBatchRequest {
+	if (!body || typeof body !== 'object' || !Array.isArray((body as DocumentCollectionBatchRequest).notes)) {
+		throw new BridgeProtocolError('invalid_document_batch', 400, '文档集合批次无效');
+	}
+	const request = body as DocumentCollectionBatchRequest;
+	if (request.notes.length < 1 || request.notes.length > DOCUMENT_COLLECTION_BATCH_MAX_NOTES) {
+		throw new BridgeProtocolError('invalid_document_count', 400, '文档集合批次数量无效');
+	}
+	const pageIds = new Set<string>();
+	let totalBytes = 0;
+	for (const note of request.notes) {
+		if (!note || typeof note.pageId !== 'string' || !note.pageId || note.pageId.length > 500 ||
+			typeof note.contentHash !== 'string' || !/^[a-f0-9]{8,128}$/i.test(note.contentHash) ||
+			typeof note.path !== 'string' || !isSafeNotePath(note.path) || typeof note.content !== 'string') {
+			throw new BridgeProtocolError('invalid_document_note', 400, '文档集合包含无效笔记');
+		}
+		if (pageIds.has(note.pageId)) throw new BridgeProtocolError('duplicate_document_page', 400, '文档集合包含重复页面');
+		pageIds.add(note.pageId);
+		totalBytes += Buffer.byteLength(note.content, 'utf8');
+		if (totalBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) {
+			throw new BridgeProtocolError('document_batch_too_large', 413, '文档集合批次内容超过限制');
+		}
+	}
+	return request;
+}
+
+function validateDocumentCollectionComplete(body: unknown): DocumentCollectionCompleteRequest {
+	if (!body || typeof body !== 'object' || !Array.isArray((body as DocumentCollectionCompleteRequest).expectedPageIds)) {
+		throw new BridgeProtocolError('invalid_document_completion', 400, '文档集合完成清单无效');
+	}
+	const request = body as DocumentCollectionCompleteRequest;
+	if (
+		request.expectedPageIds.length < 1 ||
+		request.expectedPageIds.length > 5_000 ||
+		request.expectedPageIds.some(pageId => typeof pageId !== 'string' || !pageId || pageId.length > 500)
+	) {
+		throw new BridgeProtocolError('invalid_document_completion', 400, '文档集合完成清单无效');
+	}
+	return request;
 }
 
 export function hashPairingToken(token: string): string {
@@ -271,6 +320,7 @@ export class BridgeHttpServer {
 				const capabilities = [
 					...(this.options.resumable ? [FEISHU_BRIDGE_RESUMABLE_CAPABILITY] : []),
 					...(this.options.documentBundleWriter ? [DOCUMENT_BUNDLE_CAPABILITY] : []),
+					...(this.options.documentCollections ? [DOCUMENT_COLLECTION_CAPABILITY] : []),
 				];
 				sendJson(response, 200, {
 					service: 'clipper-attachment-bridge',
@@ -284,6 +334,38 @@ export class BridgeHttpServer {
 						}
 						: {}),
 				});
+				return;
+			}
+
+			if (request.method === 'POST' && url.pathname === '/v1/document-collections' && this.options.documentCollections) {
+				const body = await readJson<DocumentCollectionCreateRequest>(request);
+				const result = await this.options.documentCollections.create(body);
+				sendJson(response, result.resumed ? 200 : 201, result);
+				return;
+			}
+
+			const collectionBatchMatch = url.pathname.match(/^\/v1\/document-collections\/([^/]+)\/batches$/);
+			if (request.method === 'POST' && collectionBatchMatch && this.options.documentCollections) {
+				const body = validateDocumentCollectionBatch(await readJson<unknown>(request, DOCUMENT_COLLECTION_BATCH_MAX_BYTES * 2));
+				const result = await this.options.documentCollections.writeBatch(
+					decodeURIComponent(collectionBatchMatch[1]),
+					body
+				);
+				sendJson(response, 200, result);
+				return;
+			}
+
+			const collectionCompleteMatch = url.pathname.match(/^\/v1\/document-collections\/([^/]+)\/complete$/);
+			if (request.method === 'POST' && collectionCompleteMatch && this.options.documentCollections) {
+				const hasBody = Boolean(request.headers['content-length'] || request.headers['transfer-encoding']);
+				const body = hasBody
+					? validateDocumentCollectionComplete(await readJson<unknown>(request))
+					: undefined;
+				const result = await this.options.documentCollections.complete(
+					decodeURIComponent(collectionCompleteMatch[1]),
+					body
+				);
+				sendJson(response, 200, result);
 				return;
 			}
 

@@ -13,6 +13,10 @@ import {
 	type FeishuBridgeUploadAssetResponse,
 	type DocumentBundleWriteRequest,
 	type DocumentBundleWriteResponse,
+	type DocumentCollectionBatchRequest,
+	type DocumentCollectionCompleteRequest,
+	type DocumentCollectionCreateRequest,
+	type DocumentCollectionStatusResponse,
 } from './bridge-protocol';
 
 type FetchImplementation = (
@@ -219,6 +223,50 @@ export class FeishuBridgeClient {
 			body: JSON.stringify(request),
 			signal,
 		});
+	}
+
+	createDocumentCollection(
+		request: DocumentCollectionCreateRequest,
+		signal?: AbortSignal
+	): Promise<DocumentCollectionStatusResponse> {
+		return this.requestJson('/v1/document-collections', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(request),
+			signal,
+		});
+	}
+
+	writeDocumentCollectionBatch(
+		collectionId: string,
+		request: DocumentCollectionBatchRequest,
+		signal?: AbortSignal
+	): Promise<DocumentCollectionStatusResponse> {
+		return this.requestJson(
+			`/v1/document-collections/${encodeURIComponent(collectionId)}/batches`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(request),
+				signal,
+			}
+		);
+	}
+
+	completeDocumentCollection(
+		collectionId: string,
+		request: DocumentCollectionCompleteRequest,
+		signal?: AbortSignal
+	): Promise<DocumentCollectionStatusResponse> {
+		return this.requestJson(
+			`/v1/document-collections/${encodeURIComponent(collectionId)}/complete`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(request),
+				signal,
+			}
+		);
 	}
 
 	private async requestJson<T>(

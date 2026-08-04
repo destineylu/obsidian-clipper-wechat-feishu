@@ -170,7 +170,7 @@ describe('FeishuBridgeClient', () => {
 	});
 
 	test('writes a document bundle as one authenticated JSON request', async () => {
-		const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+		const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
 			notePaths: ['Docs/Index.md'],
 		}), {
 			status: 200,
@@ -196,6 +196,29 @@ describe('FeishuBridgeClient', () => {
 				}),
 			})
 		);
+	});
+
+	test('creates, batches, and completes a resumable document collection', async () => {
+		const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+			collectionId: 'llms-txt-12345678', resumed: false, totalPages: 1,
+			completedPageIds: [], notePaths: {}, completed: false,
+		}), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+		const client = new FeishuBridgeClient({
+			endpoint: 'http://127.0.0.1:27124', pairingToken: 'test-token', fetchImpl,
+		});
+		await client.createDocumentCollection({
+			collectionId: 'llms-txt-12345678', title: 'Docs',
+			rootUrl: 'https://example.com/docs/en/', locale: 'en', totalPages: 1,
+		});
+		await client.writeDocumentCollectionBatch('llms-txt-12345678', {
+			notes: [{ pageId: 'intro', path: 'Docs/Intro.md', content: '# Intro', contentHash: '12345678' }],
+		});
+		await client.completeDocumentCollection('llms-txt-12345678', { expectedPageIds: ['intro'] });
+		expect(fetchImpl.mock.calls.map(call => String(call[0]))).toEqual([
+			'http://127.0.0.1:27124/v1/document-collections',
+			'http://127.0.0.1:27124/v1/document-collections/llms-txt-12345678/batches',
+			'http://127.0.0.1:27124/v1/document-collections/llms-txt-12345678/complete',
+		]);
 	});
 
 	test('rejects an empty pairing token before making a request', () => {

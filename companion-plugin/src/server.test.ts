@@ -18,6 +18,7 @@ afterEach(async () => {
 
 function createWriter(): BridgeTransactionWriter & DocumentBundleWriter {
 	return {
+		documentNoteExists: vi.fn(async () => true),
 		reserveAssetPath: vi.fn((_transactionId, index, filename) =>
 			`Attachments/${index}-${filename}`
 		),
@@ -33,6 +34,9 @@ function createWriter(): BridgeTransactionWriter & DocumentBundleWriter {
 		}),
 		commitDocumentBundle: vi.fn(async request => ({
 			notePaths: request.notes.map(note => note.path),
+		})),
+		commitDocumentCollectionBatch: vi.fn(async notes => ({
+			notePaths: notes.map(note => note.ownedPath || note.path),
 		})),
 		release: vi.fn(),
 	};

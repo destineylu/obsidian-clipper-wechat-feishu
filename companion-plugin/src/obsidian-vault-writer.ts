@@ -8,6 +8,7 @@ import type {
 import type {
 	DocumentBundleWriteRequest,
 	DocumentBundleWriteResponse,
+	DocumentCollectionNoteRequest,
 	FeishuBridgeCommitResponse,
 } from '../../src/platforms/feishu/bridge-protocol';
 import { BridgeProtocolError } from './transaction-store';
@@ -256,18 +257,67 @@ export class ObsidianVaultWriter implements BridgeTransactionWriter, DocumentBun
 		}
 	}
 
-	private uniqueNotePath(requestedPath: string): string {
-		if (!this.app.vault.getAbstractFileByPath(requestedPath)) {
+	async commitDocumentCollectionBatch(
+		notes: Array<DocumentCollectionNoteRequest & { ownedPath?: string }>
+	): Promise<DocumentBundleWriteResponse> {
+		const createdNotes: TFile[] = [];
+		const modifiedNotes: Array<{ file: TFile; original: string }> = [];
+		const batchPaths = new Set<string>();
+		const prepared = notes.map(note => {
+			const requestedPath = this.validateNotePath(note.path);
+			const path = note.ownedPath
+				? this.validateNotePath(note.ownedPath)
+				: this.uniqueNotePath(requestedPath, batchPaths);
+			const pathKey = path.toLowerCase();
+			if (batchPaths.has(pathKey)) {
+				throw new BridgeProtocolError('duplicate_owned_note_path', 409, '文档集合笔记归属路径重复');
+			}
+			batchPaths.add(pathKey);
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			if (existing && !isVaultFile(existing)) {
+				throw new BridgeProtocolError('note_path_conflict', 409, '笔记路径被文件夹占用');
+			}
+			return { ...note, path, existing };
+		});
+		try {
+			for (const note of prepared) {
+				await this.ensureParentFolders(note.path);
+				if (note.existing) {
+					modifiedNotes.push({ file: note.existing, original: await this.app.vault.read(note.existing) });
+					await this.app.vault.modify(note.existing, note.content);
+				} else {
+					createdNotes.push(await this.app.vault.create(note.path, note.content));
+				}
+			}
+			return { notePaths: prepared.map(note => note.path) };
+		} catch (error) {
+			for (const note of [...modifiedNotes].reverse()) {
+				await this.app.vault.modify(note.file, note.original).catch(() => undefined);
+			}
+			for (const note of [...createdNotes].reverse()) {
+				await this.app.fileManager.trashFile(note).catch(() => undefined);
+			}
+			throw error;
+		}
+	}
+
+	private uniqueNotePath(requestedPath: string, reservedPaths = new Set<string>()): string {
+		if (!this.app.vault.getAbstractFileByPath(requestedPath) && !reservedPaths.has(requestedPath.toLowerCase())) {
 			return requestedPath;
 		}
 		const withoutExtension = requestedPath.replace(/\.md$/i, '');
 		let index = 1;
 		let candidate = `${withoutExtension}-${index}.md`;
-		while (this.app.vault.getAbstractFileByPath(candidate)) {
+		while (this.app.vault.getAbstractFileByPath(candidate) || reservedPaths.has(candidate.toLowerCase())) {
 			index += 1;
 			candidate = `${withoutExtension}-${index}.md`;
 		}
 		return candidate;
+	}
+
+	async documentNoteExists(rawPath: string): Promise<boolean> {
+		const path = this.validateNotePath(rawPath);
+		return isVaultFile(this.app.vault.getAbstractFileByPath(path));
 	}
 
 	private async ensureParentFolders(path: string): Promise<void> {

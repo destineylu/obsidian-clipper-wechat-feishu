@@ -49,6 +49,7 @@ const MAX_FEISHU_MEDIA_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_FEISHU_API_ERROR_BYTES = 64 * 1024;
 const FEISHU_BRIDGE_TRANSFER_TIMEOUT_MS = 15 * 60_000;
 const FEISHU_BRIDGE_RESUMABLE_WAIT_TIMEOUT_MS = 12 * 60 * 60_000;
+const FEISHU_BRIDGE_ZERO_PROGRESS_TIMEOUT_MS = 20_000;
 const FEISHU_BRIDGE_UPLOAD_CONCURRENCY = 2;
 const FEISHU_BRIDGE_URL_RESOLVE_CONCURRENCY = 6;
 const FEISHU_BRIDGE_TRANSIENT_RETRY_DELAY_MS = 1_000;
@@ -498,7 +499,10 @@ async function openFeishuBridgeDirectAsset(
 	const response = await fetch(directUrl, {
 		method: 'GET',
 		cache: 'no-store',
-		credentials: 'omit',
+		// The page-observed URL can belong to an external/shared document that
+		// the configured tenant app cannot read. Let Chromium attach its existing
+		// Feishu session only to the strict official-media allowlist above.
+		credentials: 'include',
 		signal,
 	});
 	return validateFeishuBridgeAssetResponse(
@@ -933,6 +937,29 @@ async function publishFeishuBridgeProgress(
 	}).catch(() => undefined);
 }
 
+export async function publishFeishuBridgeFallbackCompletion(
+	sourceUrl: string,
+	result: FeishuBridgeCommitResponse,
+	assetCount: number
+): Promise<void> {
+	await clearFeishuBridgeProgress(sourceUrl);
+	await browser.runtime.sendMessage({
+		action: 'feishuBridgeProgress',
+		sourceUrl,
+		progress: {
+			sessionId: 'browser-fallback',
+			phase: 'completed',
+			assetCount,
+			completedAssets: assetCount,
+			failedAssets: 0,
+			downloadedBytes: 0,
+			isTotalBytesFinal: false,
+			notePath: result.notePath,
+			updatedAt: new Date().toISOString(),
+		},
+	}).catch(() => undefined);
+}
+
 function waitForBridgePoll(
 	signal: AbortSignal,
 	delayMs = 1_000
@@ -1024,6 +1051,15 @@ export interface FeishuBridgeResumableTransferDependencies {
 		status: FeishuBridgeSessionStatus
 	): Promise<void>;
 	pollDelay?(signal: AbortSignal): Promise<void>;
+	now?(): number;
+	zeroProgressTimeoutMs?: number;
+}
+
+export class FeishuBridgeZeroProgressError extends Error {
+	constructor() {
+		super('Companion 下载保持零字节，正在切换到浏览器下载');
+		this.name = 'FeishuBridgeZeroProgressError';
+	}
 }
 
 export function hasFeishuBridgeUnauthorizedAssets(
@@ -1033,6 +1069,14 @@ export function hasFeishuBridgeUnauthorizedAssets(
 		asset.state === 'failed' &&
 		typeof asset.error === 'string' &&
 		/\bHTTP 401\b/i.test(asset.error)
+	);
+}
+
+function hasFeishuBridgeInFlightAssets(
+	status: FeishuBridgeSessionStatus
+): boolean {
+	return (status.activeAssets || 0) > 0 || status.assets.some(
+		asset => asset.state === 'pending' || asset.state === 'downloading'
 	);
 }
 
@@ -1054,6 +1098,9 @@ export async function transferFeishuNoteWithResumableBridge(
 		dependencies.resolveAssets ?? resolveFeishuRemoteAssetRequests;
 	const pollDelay =
 		dependencies.pollDelay ?? ((signal: AbortSignal) => waitForBridgePoll(signal));
+	const now = dependencies.now ?? (() => Date.now());
+	const zeroProgressTimeoutMs = dependencies.zeroProgressTimeoutMs ??
+		FEISHU_BRIDGE_ZERO_PROGRESS_TIMEOUT_MS;
 
 	try {
 		const health = await dependencies.client.health(controller.signal);
@@ -1088,6 +1135,9 @@ export async function transferFeishuNoteWithResumableBridge(
 			})),
 		}, controller.signal);
 		let status = created.status;
+		let lastProgressAt = now();
+		let observedBytes = status.downloadedBytes;
+		let observedCompletedAssets = status.completedAssets;
 		await publish(input.sourceUrl, status);
 		if (status.phase !== 'completed') {
 			const missingIndexes = status.assets
@@ -1130,6 +1180,23 @@ export async function transferFeishuNoteWithResumableBridge(
 				controller.signal
 			);
 			await publish(input.sourceUrl, status);
+			if (
+				status.downloadedBytes > observedBytes ||
+				status.completedAssets > observedCompletedAssets
+			) {
+				observedBytes = status.downloadedBytes;
+				observedCompletedAssets = status.completedAssets;
+				lastProgressAt = now();
+			} else if (
+				hasFeishuBridgeInFlightAssets(status) &&
+				now() - lastProgressAt >= zeroProgressTimeoutMs
+			) {
+				await dependencies.client.abortSession(
+					created.sessionId,
+					controller.signal
+				).catch(() => undefined);
+				throw new FeishuBridgeZeroProgressError();
+			}
 		}
 
 		return {
@@ -1281,12 +1348,23 @@ async function transferFeishuBridgeRequest(
 	const health = await client.health();
 	const useResumable = shouldUseFeishuResumableBridge(health, assets);
 	if (useResumable) {
-		return transferFeishuNoteWithResumableBridge(input, { client });
+		try {
+			return await transferFeishuNoteWithResumableBridge(input, { client });
+		} catch (error) {
+			if (!(error instanceof FeishuBridgeZeroProgressError)) throw error;
+			await clearFeishuBridgeProgress(input.sourceUrl);
+		}
 	}
-	return transferFeishuNoteWithBridge(input, {
+	const result = await transferFeishuNoteWithBridge(input, {
 		client,
 		downloadAsset: downloadFeishuBridgeAsset,
 	});
+	await publishFeishuBridgeFallbackCompletion(
+		input.sourceUrl,
+		result,
+		assets.length
+	);
+	return result;
 }
 
 async function getFeishuBridgeProgress(

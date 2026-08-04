@@ -19,6 +19,7 @@ import {
 import { BridgeSettingsTab } from './settings';
 import { ResumableSessionStore } from './resumable-session-store';
 import { TransactionStore } from './transaction-store';
+import { DocumentCollectionStore } from './document-collection-store';
 import type { BridgePluginSettings } from './types';
 
 export default class ClipperAttachmentBridgePlugin extends Plugin {
@@ -90,6 +91,17 @@ export default class ClipperAttachmentBridgePlugin extends Plugin {
 				downloadConcurrency: this.settings.downloadConcurrency,
 			});
 			await sessionStore.initialize();
+			const documentCollections = new DocumentCollectionStore(
+				writer,
+				join(
+					adapter.getBasePath(),
+					this.app.vault.configDir,
+					'plugins',
+					this.manifest.id,
+					'document-collections'
+				)
+			);
+			await documentCollections.initialize();
 			const store = new TransactionStore(writer, {
 				maxAssetBytes: this.settings.maxAssetBytes,
 				maxTransactionBytes: this.settings.maxTransactionBytes,
@@ -101,6 +113,7 @@ export default class ClipperAttachmentBridgePlugin extends Plugin {
 				vaultName: this.app.vault.getName(),
 				store,
 				documentBundleWriter: writer,
+				documentCollections,
 				resumable: {
 					store: sessionStore,
 					limits: {

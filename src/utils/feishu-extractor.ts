@@ -523,6 +523,25 @@ function buildFeishuImagePlaceholder(token: string, fallbackUrl?: string): strin
 		: placeholder;
 }
 
+export function buildFeishuImageBrowserFallbackUrl(
+	token: string,
+	blockId: string
+): string | undefined {
+	if (!/^[\w-]+$/.test(token) || !/^[\w-]+$/.test(blockId)) {
+		return undefined;
+	}
+	return [
+		'https://internal-api-drive-stream.feishu.cn',
+		'/space/api/box/stream/download/v2/cover/',
+		`${encodeURIComponent(token)}/`,
+		'?fallback_source=1',
+		`&mount_node_token=${encodeURIComponent(blockId)}`,
+		'&mount_point=docx_image',
+		'&policy=equal',
+		'&width=1280',
+	].join('');
+}
+
 function buildFeishuFilePlaceholder(token: string): string {
 	return `feishu-file://${token}`;
 }
@@ -750,7 +769,8 @@ function buildVideoHtml(src: string, options: { title?: string; poster?: string 
 function resolveImageSource(block: FeishuBlock, context: FeishuRenderContext): string | null {
 	const token = block.image?.token;
 	if (token) {
-		const fallbackUrl = context.domMedia.imageUrlsByToken.get(token);
+		const fallbackUrl = context.domMedia.imageUrlsByToken.get(token) ||
+			buildFeishuImageBrowserFallbackUrl(token, block.block_id);
 		const placeholder = buildFeishuImagePlaceholder(token, fallbackUrl);
 		debugLog('Feishu', 'Resolved image block to placeholder', {
 			blockType: block.block_type,

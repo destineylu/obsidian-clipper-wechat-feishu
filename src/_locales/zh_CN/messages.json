@@ -110,7 +110,7 @@
 		"message": "收藏整个说明文档"
 	},
 	"clipDocumentationConfirm": {
-		"message": "收藏“$1”？\n\n页面数：$2\n保存方式：$3\n\n同路径的现有笔记将被覆盖，不会删除其他笔记。"
+		"message": "收藏“$1”？\n\n页面数：$2\n语言：$3\n保存方式：$4\n\n只覆盖此文档集合先前生成的笔记；不会删除用户笔记或官网已下线页面。"
 	},
 	"clipboardError": {
 		"message": "Obsidian 无法访问你的剪贴板。请尝试此处的故障排除说明：$1",
@@ -199,7 +199,10 @@
 		"message": "说明文档收藏失败"
 	},
 	"documentationLookingForIndex": {
-		"message": "正在查找 Sphinx 文档索引"
+		"message": "正在查找官方文档索引"
+	},
+	"documentationCompanionRequired": {
+		"message": "该文档共 $1 页，超过 100 页。请连接 Companion 后按文件夹和多篇笔记保存。"
 	},
 	"documentationMergedMode": {
 		"message": "合并为一篇 Markdown（配套插件不可用）"

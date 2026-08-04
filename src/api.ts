@@ -38,6 +38,15 @@ export interface ClipResult {
 	variables: Record<string, string>;
 }
 
+export interface MarkdownClipOptions {
+	markdown: string;
+	title: string;
+	url: string;
+	template: Template;
+	language?: string;
+	propertyTypes?: Record<string, string>;
+}
+
 // ---------------------------------------------------------------------------
 // Selector resolvers (work on any { querySelectorAll } document)
 // ---------------------------------------------------------------------------
@@ -253,6 +262,56 @@ export async function clip(options: ClipOptions): Promise<ClipResult> {
 		frontmatter,
 		content,
 		fullContent,
+		properties: compiledProperties,
+		variables,
+	};
+}
+
+/**
+ * Apply an existing Web Clipper template to trusted Markdown obtained from an
+ * official documentation index. Selector variables are intentionally empty
+ * because there is no source DOM for direct Markdown pages.
+ */
+export async function clipMarkdown(options: MarkdownClipOptions): Promise<ClipResult> {
+	const { markdown, title, url, template, propertyTypes } = options;
+	const variables = buildVariables({
+		title,
+		author: '',
+		content: markdown,
+		contentHtml: '',
+		url,
+		fullHtml: '',
+		description: '',
+		favicon: '',
+		image: '',
+		published: '',
+		site: new URL(url).hostname,
+		language: options.language || '',
+		wordCount: markdown.trim() ? markdown.trim().split(/\s+/).length : 0,
+	});
+	const compile = (text: string) => compileTemplate(0, text, variables, url);
+	const compiledNoteName = await compile(template.noteNameFormat);
+	const noteName = sanitizeFileName(compiledNoteName) || sanitizeFileName(title) || 'Untitled';
+	const compiledProperties: Property[] = await Promise.all(
+		template.properties.map(async prop => {
+			let value = await compile(prop.value);
+			const propType = prop.type || 'text';
+			value = formatPropertyValue(value, propType, prop.value);
+			return { name: prop.name, value, type: prop.type };
+		})
+	);
+	const typeMap: Record<string, string> = {};
+	for (const prop of template.properties) {
+		if (prop.type) typeMap[prop.name] = prop.type;
+	}
+	if (propertyTypes) Object.assign(typeMap, propertyTypes);
+	const frontmatter = generateFrontmatter(compiledProperties, typeMap);
+	const content = await compile(template.noteContentFormat);
+	return {
+		noteName,
+		frontmatter,
+		content,
+		fullContent: frontmatter ? frontmatter + content : content,
 		properties: compiledProperties,
 		variables,
 	};
