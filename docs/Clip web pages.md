@@ -36,7 +36,7 @@ documentation root.
    on ordinary web pages.
 3. Click the small **▼** on the right side of the purple **Add to Obsidian**
    button.
-4. Choose **Clip entire documentation** from the menu.
+4. Choose **收藏整个说明文档** from the menu.
 5. Review the detected title, page count and save mode in the confirmation
    dialog, then click **OK**. The progress panel reports discovery, collection
    and writing separately.
