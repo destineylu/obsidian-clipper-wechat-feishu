@@ -30,6 +30,16 @@ import {
 	isFeishuBridgeSessionActive,
 } from '../platforms/feishu/bridge-progress';
 import { countNoteContentMedia } from './content-status';
+import {
+	buildDocumentBundleOutput,
+	collectDocumentPages,
+	discoverSphinxDocumentation,
+	isLikelySphinxDocumentationHtml,
+	type FetchTextResult,
+} from './document-bundle';
+import { loadPlatformSettings } from '../platforms/settings';
+import { FeishuBridgeClient } from '../platforms/feishu/bridge-client';
+import { DOCUMENT_BUNDLE_CAPABILITY } from '../platforms/feishu/bridge-protocol';
 
 interface ReaderModeResponse {
 	success: boolean;
@@ -46,6 +56,8 @@ let largeNoteContentValue: string | null = null;
 let isClipObsidianBusy = false;
 let isClipObsidianSaved = false;
 let isClipObsidianRequestActive = false;
+let isDocumentBundleBusy = false;
+let isDocumentBundleAvailable = false;
 let lastFeishuBridgeProgress: FeishuBridgeProgress | null = null;
 let pageRefreshGeneration = 0;
 let preparedPageContext: { tabId: number; url: string; identity: string } | null =
@@ -769,6 +781,7 @@ function setupEventListeners(tabId: number) {
 	const copyContentButton = document.getElementById('copy-content');
 	const saveDownloadsButton = document.getElementById('save-downloads');
 	const shareContentButton = document.getElementById('share-content');
+	const documentBundleButton = document.getElementById('document-bundle-btn');
 
 	if (moreButton && moreDropdown) {
 		moreButton.addEventListener('click', (e) => {
@@ -782,6 +795,11 @@ function setupEventListeners(tabId: number) {
 				moreDropdown.classList.remove('show');
 			}
 		});
+	}
+
+	if (documentBundleButton) {
+		documentBundleButton.addEventListener('click', triggerDocumentBundleFromUi);
+		initializeIcons(documentBundleButton);
 	}
 
 	if (copyContentButton) {
@@ -974,7 +992,10 @@ async function waitForInterpreter(interpretBtn: HTMLButtonElement): Promise<void
 
 async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebuildSkeleton = true }: { checkTemplateTriggers?: boolean; rebuildSkeleton?: boolean } = {}) {
 	const generation = ++pageRefreshGeneration;
-	if (currentTabId === tabId) preparedPageContext = null;
+	if (currentTabId === tabId) {
+		preparedPageContext = null;
+		setDocumentBundleAvailable(false);
+	}
 	const isCurrentRefresh = () =>
 		generation === pageRefreshGeneration && currentTabId === tabId;
 	if (templates.length === 0) {
@@ -1028,6 +1049,9 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 		const extractedData = await extractionPromise;
 		if (!isCurrentRefresh()) return;
 		if (extractedData) {
+			setDocumentBundleAvailable(
+				isLikelySphinxDocumentationHtml(extractedData.fullHtml || '')
+			);
 			const currentUrl = tab.url;
 
 			const initializedContent = await initializePageContent(
@@ -1619,13 +1643,19 @@ async function handleSaveToDownloads() {
 function determineMainAction() {
 	const mainButton = document.getElementById('clip-btn') as HTMLButtonElement | null;
 	const moreButton = document.getElementById('more-btn') as HTMLButtonElement | null;
+	const documentBundleButton = document.getElementById('document-bundle-btn') as HTMLButtonElement | null;
 	const moreDropdown = document.getElementById('more-dropdown');
 	const secondaryActions = moreDropdown?.querySelector('.secondary-actions');
 	if (!mainButton || !secondaryActions) return;
 
 	// Clear existing secondary actions
 	secondaryActions.textContent = '';
-	if (isClipObsidianBusy || isClipObsidianRequestActive) {
+	if (documentBundleButton) {
+		documentBundleButton.hidden = !isDocumentBundleAvailable;
+		documentBundleButton.disabled = isClipObsidianBusy || isClipObsidianRequestActive || isDocumentBundleBusy;
+		documentBundleButton.toggleAttribute('aria-busy', isDocumentBundleBusy);
+	}
+	if (isClipObsidianBusy || isClipObsidianRequestActive || isDocumentBundleBusy) {
 		mainButton.textContent = `${getMessage('processing')}…`;
 		mainButton.disabled = true;
 		mainButton.setAttribute('aria-busy', 'true');
@@ -1671,6 +1701,12 @@ function determineMainAction() {
 			addSecondaryAction(secondaryActions, 'copyToClipboard', copyContent);
 			addSecondaryAction(secondaryActions, 'saveFile', handleSaveToDownloads);
 	}
+	addSecondaryAction(secondaryActions, 'clipEntireDocumentation', triggerDocumentBundleFromUi);
+}
+
+function setDocumentBundleAvailable(available: boolean): void {
+	isDocumentBundleAvailable = available;
+	determineMainAction();
 }
 
 function setClipObsidianBusy(busy: boolean): void {
@@ -1835,7 +1871,206 @@ function getActionIcon(actionType: string): string {
 		case 'copyToClipboard': return 'copy';
 		case 'saveFile': return 'file-down';
 		case 'addToObsidian': return 'pen-line';
+		case 'clipEntireDocumentation': return 'files';
 		default: return 'plus';
+	}
+}
+
+function updateDocumentBundleProgress(options: {
+	hidden?: boolean;
+	label?: string;
+	completed?: number;
+	total?: number;
+	detail?: string;
+	failed?: boolean;
+	completedState?: boolean;
+}): void {
+	const container = document.getElementById('document-bundle-progress');
+	const label = document.getElementById('document-bundle-progress-label');
+	const count = document.getElementById('document-bundle-progress-count');
+	const detail = document.getElementById('document-bundle-progress-detail');
+	const bar = document.getElementById('document-bundle-progress-bar') as HTMLProgressElement | null;
+	if (!container || !label || !count || !detail || !bar) return;
+
+	container.hidden = options.hidden ?? false;
+	container.classList.toggle('is-failed', Boolean(options.failed));
+	container.classList.toggle('is-completed', Boolean(options.completedState));
+	if (options.label !== undefined) label.textContent = options.label;
+	if (options.detail !== undefined) detail.textContent = options.detail;
+	const total = Math.max(1, options.total || 1);
+	const completed = Math.min(Math.max(0, options.completed || 0), total);
+	bar.max = total;
+	bar.value = options.completedState ? total : completed;
+	count.textContent = options.total ? `${completed} / ${options.total}` : '';
+}
+
+async function fetchDocumentationText(url: string): Promise<FetchTextResult> {
+	const fetchOnce = () => browser.runtime.sendMessage({
+		action: 'fetchProxy',
+		url,
+		options: {},
+	}) as Promise<FetchTextResult>;
+	let response = await fetchOnce();
+	if (response.error === 'CORS_PERMISSION_NEEDED') {
+		const granted = await browser.permissions.request({ origins: ['<all_urls>'] });
+		if (granted) response = await fetchOnce();
+	}
+	return response;
+}
+
+async function findDocumentBundleClient(selectedVault: string): Promise<{
+	client: FeishuBridgeClient;
+	vaultName?: string;
+} | null> {
+	const settings = await loadPlatformSettings();
+	const token = settings.feishu.bridgePairingToken.trim();
+	if (!token) return null;
+	try {
+		const client = new FeishuBridgeClient({
+			endpoint: settings.feishu.bridgeEndpoint,
+			pairingToken: token,
+		});
+		const health = await client.health();
+		if (!health.capabilities?.includes(DOCUMENT_BUNDLE_CAPABILITY)) return null;
+		if (selectedVault && health.vaultName && selectedVault !== health.vaultName) return null;
+		return { client, vaultName: health.vaultName };
+	} catch {
+		return null;
+	}
+}
+
+function triggerDocumentBundleFromUi(): void {
+	void handleDocumentBundle().catch(() => undefined);
+}
+
+async function handleDocumentBundle(): Promise<void> {
+	if (!currentTemplate || isDocumentBundleBusy) return;
+	const template = currentTemplate;
+	const pathField = document.getElementById('path-name-field') as HTMLInputElement | null;
+	const vaultDropdown = document.getElementById('vault-select') as HTMLSelectElement | null;
+	const selectedVault = vaultDropdown?.value || template.vault || '';
+	const basePath = pathField?.value || template.path || '';
+
+	isDocumentBundleBusy = true;
+	isClipObsidianSaved = false;
+	determineMainAction();
+	updateDocumentBundleProgress({
+		label: getMessage('documentationDetecting'),
+		detail: getMessage('documentationLookingForIndex'),
+	});
+
+	try {
+		const prepared = await requirePreparedPageContext();
+		const manifest = await discoverSphinxDocumentation(
+			prepared.url,
+			fetchDocumentationText,
+			{
+				parseFromString: (html, mimeType) => new DOMParser().parseFromString(
+					html,
+					mimeType as DOMParserSupportedType
+				),
+			}
+		);
+		const bundleClient = await findDocumentBundleClient(selectedVault);
+		const mode = bundleClient
+			? getMessage('documentationChapterMode')
+			: getMessage('documentationMergedMode');
+		const confirmed = confirm(getMessage('clipDocumentationConfirm', [
+			manifest.title,
+			String(manifest.pages.length),
+			mode,
+		]));
+		if (!confirmed) {
+			updateDocumentBundleProgress({ hidden: true });
+			return;
+		}
+
+		updateDocumentBundleProgress({
+			label: getMessage('documentationCollecting'),
+			total: manifest.pages.length,
+			completed: 0,
+			detail: manifest.rootUrl,
+		});
+		const propertyTypes = Object.fromEntries(
+			generalSettings.propertyTypes.map(property => [property.name, property.type])
+		);
+		const pages = await collectDocumentPages({
+			manifest,
+			template,
+			propertyTypes,
+			documentParser: {
+				parseFromString: (html, mimeType) => new DOMParser().parseFromString(
+					html,
+					mimeType as DOMParserSupportedType
+				),
+			},
+			fetchText: fetchDocumentationText,
+			onProgress: (completed, total, page) => updateDocumentBundleProgress({
+				label: getMessage('documentationCollecting'),
+				completed,
+				total,
+				detail: page.title,
+			}),
+		});
+		const output = buildDocumentBundleOutput({
+			manifest,
+			pages,
+			basePath,
+			collectedAt: new Date(),
+		});
+
+		updateDocumentBundleProgress({
+			label: getMessage('documentationWriting'),
+			completed: manifest.pages.length,
+			total: manifest.pages.length,
+			detail: bundleClient ? output.folderPath : output.mergedNoteName,
+		});
+		if (bundleClient) {
+			await bundleClient.client.writeDocumentBundle({
+				behavior: 'overwrite',
+				notes: output.notes,
+			});
+		} else {
+			await saveToObsidian(
+				output.mergedContent,
+				output.mergedNoteName,
+				basePath,
+				selectedVault,
+				'overwrite'
+			);
+		}
+		await incrementStat(
+			'addToObsidian',
+			selectedVault,
+			basePath,
+			manifest.rootUrl,
+			manifest.title
+		);
+		isClipObsidianSaved = true;
+		updateDocumentBundleProgress({
+			label: getMessage('documentationSaved'),
+			completed: manifest.pages.length,
+			total: manifest.pages.length,
+			detail: bundleClient
+				? getMessage('documentationSavedChapters', String(output.notes.length))
+				: getMessage('documentationSavedMerged'),
+			completedState: true,
+		});
+	} catch (error) {
+		console.error('Failed to clip documentation:', error);
+		const message = error instanceof Error
+			? error.message
+			: getMessage('documentationFailed');
+		updateDocumentBundleProgress({
+			label: getMessage('documentationFailed'),
+			detail: message,
+			failed: true,
+		});
+		showError(message, { translate: false });
+		throw error;
+	} finally {
+		isDocumentBundleBusy = false;
+		determineMainAction();
 	}
 }
 

@@ -106,6 +106,12 @@
 			}
 		}
 	},
+	"clipEntireDocumentation": {
+		"message": "Clip entire documentation"
+	},
+	"clipDocumentationConfirm": {
+		"message": "Clip \"$1\"?\n\nPages: $2\nOutput: $3\n\nExisting notes with the same paths will be overwritten. Unrelated notes will not be deleted."
+	},
 	"clipboardError": {
 		"message": "Obsidian is not able to access your clipboard. Try the troubleshooting instructions here: $1",
 		"placeholders": {
@@ -179,6 +185,36 @@
 	},
 	"deleteProviderConfirm": {
 		"message": "Are you sure you want to delete this provider?"
+	},
+	"documentationChapterMode": {
+		"message": "one Markdown note per chapter plus an index"
+	},
+	"documentationCollecting": {
+		"message": "Collecting documentation"
+	},
+	"documentationDetecting": {
+		"message": "Detecting documentation"
+	},
+	"documentationFailed": {
+		"message": "Documentation collection failed"
+	},
+	"documentationLookingForIndex": {
+		"message": "Looking for a Sphinx search index"
+	},
+	"documentationMergedMode": {
+		"message": "one merged Markdown note (companion plugin unavailable)"
+	},
+	"documentationSaved": {
+		"message": "Documentation saved"
+	},
+	"documentationSavedChapters": {
+		"message": "$1 notes saved through the companion plugin"
+	},
+	"documentationSavedMerged": {
+		"message": "Saved as one merged note"
+	},
+	"documentationWriting": {
+		"message": "Writing documentation"
 	},
 	"disableHighlighter": {
 		"message": "Turn off highlighter"

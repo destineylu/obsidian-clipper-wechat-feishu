@@ -10,10 +10,15 @@ import {
 } from 'node:http';
 
 import {
+	DOCUMENT_BUNDLE_CAPABILITY,
+	DOCUMENT_BUNDLE_MAX_BYTES,
+	DOCUMENT_BUNDLE_MAX_NOTES,
 	FEISHU_BRIDGE_PROTOCOL_VERSION,
 	FEISHU_BRIDGE_RESUMABLE_CAPABILITY,
 	type FeishuBridgeQueueAssetsRequest,
+	type DocumentBundleWriteRequest,
 } from '../../src/platforms/feishu/bridge-protocol';
+import type { DocumentBundleWriter } from './types';
 import type { ResumableSessionStore } from './resumable-session-store';
 import {
 	BridgeProtocolError,
@@ -25,6 +30,7 @@ interface BridgeHttpServerOptions {
 	pairingTokenHash: string;
 	vaultName: string;
 	store: TransactionStore;
+	documentBundleWriter?: DocumentBundleWriter;
 	resumable?: {
 		store: Pick<
 			ResumableSessionStore,
@@ -40,6 +46,52 @@ interface BridgeHttpServerOptions {
 }
 
 const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024;
+// JSON escaping can nearly double Markdown containing many backslashes/newlines.
+// The decoded content limit remains DOCUMENT_BUNDLE_MAX_BYTES below.
+const MAX_DOCUMENT_BUNDLE_BODY_BYTES = DOCUMENT_BUNDLE_MAX_BYTES * 2 + 1024 * 1024;
+
+function isSafeNotePath(path: string): boolean {
+	const normalized = path.replace(/\\/g, '/').trim();
+	const segments = normalized.split('/');
+	return Boolean(normalized) &&
+		!normalized.startsWith('/') &&
+		!/^[a-zA-Z]:/.test(normalized) &&
+		segments.every(segment => Boolean(segment) && segment !== '.' && segment !== '..') &&
+		!/[\u0000-\u001f|#\[\]]/.test(normalized);
+}
+
+function validateDocumentBundleRequest(body: unknown): DocumentBundleWriteRequest {
+	if (!body || typeof body !== 'object') {
+		throw new BridgeProtocolError('invalid_document_bundle', 400, '文档包请求无效');
+	}
+	const request = body as Partial<DocumentBundleWriteRequest>;
+	if (request.behavior !== 'overwrite' || !Array.isArray(request.notes)) {
+		throw new BridgeProtocolError('invalid_document_bundle', 400, '文档包请求无效');
+	}
+	if (request.notes.length < 1 || request.notes.length > DOCUMENT_BUNDLE_MAX_NOTES) {
+		throw new BridgeProtocolError('invalid_document_count', 400, '文档包笔记数量无效');
+	}
+	const paths = new Set<string>();
+	let totalBytes = 0;
+	for (const note of request.notes) {
+		if (!note || typeof note.path !== 'string' || typeof note.content !== 'string' || !isSafeNotePath(note.path)) {
+			throw new BridgeProtocolError('invalid_document_note', 400, '文档包包含无效笔记');
+		}
+		if (note.sourceUrl !== undefined && (typeof note.sourceUrl !== 'string' || note.sourceUrl.length > 8192)) {
+			throw new BridgeProtocolError('invalid_document_source', 400, '文档来源地址无效');
+		}
+		const pathKey = note.path.replace(/\\/g, '/').toLowerCase();
+		if (paths.has(pathKey)) {
+			throw new BridgeProtocolError('duplicate_document_path', 400, '文档包包含重复笔记路径');
+		}
+		paths.add(pathKey);
+		totalBytes += Buffer.byteLength(note.content, 'utf8');
+		if (totalBytes > DOCUMENT_BUNDLE_MAX_BYTES) {
+			throw new BridgeProtocolError('document_bundle_too_large', 413, '文档包内容超过限制');
+		}
+	}
+	return request as DocumentBundleWriteRequest;
+}
 
 export function hashPairingToken(token: string): string {
 	return createHash('sha256').update(token, 'utf8').digest('hex');
@@ -216,20 +268,34 @@ export class BridgeHttpServer {
 			);
 
 			if (request.method === 'GET' && url.pathname === '/v1/health') {
+				const capabilities = [
+					...(this.options.resumable ? [FEISHU_BRIDGE_RESUMABLE_CAPABILITY] : []),
+					...(this.options.documentBundleWriter ? [DOCUMENT_BUNDLE_CAPABILITY] : []),
+				];
 				sendJson(response, 200, {
 					service: 'clipper-attachment-bridge',
 					protocolVersion: FEISHU_BRIDGE_PROTOCOL_VERSION,
 					ready: true,
 					vaultName: this.options.vaultName,
+					...(capabilities.length ? { capabilities } : {}),
 					...(this.options.resumable
 						? {
-							capabilities: [
-								FEISHU_BRIDGE_RESUMABLE_CAPABILITY,
-							],
 							limits: this.options.resumable.limits,
 						}
 						: {}),
 				});
+				return;
+			}
+
+			if (
+				request.method === 'POST' &&
+				url.pathname === '/v1/document-bundles' &&
+				this.options.documentBundleWriter
+			) {
+				const body = await readJson<unknown>(request, MAX_DOCUMENT_BUNDLE_BODY_BYTES);
+				const validated = validateDocumentBundleRequest(body);
+				const result = await this.options.documentBundleWriter.commitDocumentBundle(validated);
+				sendJson(response, 200, result);
 				return;
 			}
 

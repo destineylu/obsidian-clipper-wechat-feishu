@@ -3,7 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-import type { BridgeTransactionWriter } from './types';
+import type { BridgeTransactionWriter, DocumentBundleWriter } from './types';
 import {
 	BridgeHttpServer,
 	hashPairingToken,
@@ -16,7 +16,7 @@ afterEach(async () => {
 	await Promise.all(servers.splice(0).map(server => server.stop()));
 });
 
-function createWriter(): BridgeTransactionWriter {
+function createWriter(): BridgeTransactionWriter & DocumentBundleWriter {
 	return {
 		reserveAssetPath: vi.fn((_transactionId, index, filename) =>
 			`Attachments/${index}-${filename}`
@@ -31,6 +31,9 @@ function createWriter(): BridgeTransactionWriter {
 				assetPaths: [...transaction.assets.values()].map(asset => asset.vaultPath),
 			};
 		}),
+		commitDocumentBundle: vi.fn(async request => ({
+			notePaths: request.notes.map(note => note.path),
+		})),
 		release: vi.fn(),
 	};
 }
@@ -281,5 +284,78 @@ describe('BridgeHttpServer', () => {
 			assetPaths: ['Attachments/0-image.png'],
 		});
 		expect(writer.commit).toHaveBeenCalledTimes(1);
+	});
+
+	test('advertises and validates document bundle writes', async () => {
+		const writer = createWriter();
+		const store = new TransactionStore(writer, {
+			maxAssetBytes: 1024,
+			maxTransactionBytes: 4096,
+			transactionTtlMs: 60_000,
+		});
+		const server = new BridgeHttpServer({
+			port: 0,
+			pairingTokenHash: hashPairingToken('pairing-token'),
+			vaultName: 'Test Vault',
+			store,
+			documentBundleWriter: writer,
+		});
+		servers.push(server);
+		const port = await server.start();
+		const endpoint = `http://127.0.0.1:${port}`;
+		const headers = {
+			Authorization: 'Bearer pairing-token',
+			'Content-Type': 'application/json',
+		};
+
+		const health = await fetch(`${endpoint}/v1/health`, { headers });
+		await expect(health.json()).resolves.toMatchObject({
+			capabilities: ['document-bundle-v1'],
+		});
+
+		const valid = await fetch(`${endpoint}/v1/document-bundles`, {
+			method: 'POST',
+			headers,
+			body: JSON.stringify({
+				behavior: 'overwrite',
+				notes: [
+					{ path: 'Docs/Index.md', content: '# Index' },
+					{ path: 'Docs/Guide.md', content: '# Guide' },
+				],
+			}),
+		});
+		expect(valid.status).toBe(200);
+		await expect(valid.json()).resolves.toEqual({
+			notePaths: ['Docs/Index.md', 'Docs/Guide.md'],
+		});
+		expect(writer.commitDocumentBundle).toHaveBeenCalledTimes(1);
+
+		for (const invalidBody of [
+			{
+				behavior: 'overwrite',
+				notes: [{ path: '../outside.md', content: 'x' }],
+			},
+			{
+				behavior: 'overwrite',
+				notes: [
+					{ path: 'Docs/Same.md', content: 'x' },
+					{ path: 'docs/same.md', content: 'y' },
+				],
+			},
+			{
+				behavior: 'overwrite',
+				notes: Array.from({ length: 102 }, (_, index) => ({
+					path: `Docs/${index}.md`,
+					content: 'x',
+				})),
+			},
+		]) {
+			const response = await fetch(`${endpoint}/v1/document-bundles`, {
+				method: 'POST',
+				headers,
+				body: JSON.stringify(invalidBody),
+			});
+			expect(response.status).toBe(400);
+		}
 	});
 });

@@ -1,4 +1,6 @@
 import type {
+	DocumentBundleWriteRequest,
+	DocumentBundleWriteResponse,
 	FeishuBridgeCommitResponse,
 	FeishuBridgeCreateTransactionRequest,
 	FeishuBridgeUploadAssetResponse,
@@ -47,4 +49,10 @@ export interface BridgeTransactionWriter {
 		content: string
 	): Promise<FeishuBridgeCommitResponse>;
 	release(transactionId: string): void;
+}
+
+export interface DocumentBundleWriter {
+	commitDocumentBundle(
+		request: DocumentBundleWriteRequest
+	): Promise<DocumentBundleWriteResponse>;
 }

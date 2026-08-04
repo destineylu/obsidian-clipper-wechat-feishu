@@ -9,6 +9,10 @@ export const DEFAULT_FEISHU_BRIDGE_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_FEISHU_BRIDGE_FILE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 export const DEFAULT_FEISHU_BRIDGE_SESSION_MAX_BYTES = 20 * 1024 * 1024 * 1024;
 export const FEISHU_BRIDGE_RESUMABLE_CAPABILITY = 'resumable-remote-media-v1';
+export const DOCUMENT_BUNDLE_CAPABILITY = 'document-bundle-v1';
+export const DOCUMENT_BUNDLE_MAX_PAGES = 100;
+export const DOCUMENT_BUNDLE_MAX_NOTES = DOCUMENT_BUNDLE_MAX_PAGES + 1;
+export const DOCUMENT_BUNDLE_MAX_BYTES = 20 * 1024 * 1024;
 
 export type FeishuBridgeSupportedBehavior = Extract<
 	Template['behavior'],
@@ -26,6 +30,21 @@ export interface FeishuBridgeHealthResponse {
 		fileBytes: number;
 		sessionBytes: number;
 	};
+}
+
+export interface DocumentBundleNoteRequest {
+	path: string;
+	content: string;
+	sourceUrl?: string;
+}
+
+export interface DocumentBundleWriteRequest {
+	behavior: 'overwrite';
+	notes: DocumentBundleNoteRequest[];
+}
+
+export interface DocumentBundleWriteResponse {
+	notePaths: string[];
 }
 
 export interface FeishuBridgeCreateTransactionRequest {

@@ -106,6 +106,12 @@
 			}
 		}
 	},
+	"clipEntireDocumentation": {
+		"message": "收藏整个说明文档"
+	},
+	"clipDocumentationConfirm": {
+		"message": "收藏“$1”？\n\n页面数：$2\n保存方式：$3\n\n同路径的现有笔记将被覆盖，不会删除其他笔记。"
+	},
 	"clipboardError": {
 		"message": "Obsidian 无法访问你的剪贴板。请尝试此处的故障排除说明：$1",
 		"placeholders": {
@@ -179,6 +185,36 @@
 	},
 	"deleteProviderConfirm": {
 		"message": "您确定要删除此提供商吗？"
+	},
+	"documentationChapterMode": {
+		"message": "按章节保存为多篇 Markdown，并生成目录"
+	},
+	"documentationCollecting": {
+		"message": "正在收藏说明文档"
+	},
+	"documentationDetecting": {
+		"message": "正在识别说明文档"
+	},
+	"documentationFailed": {
+		"message": "说明文档收藏失败"
+	},
+	"documentationLookingForIndex": {
+		"message": "正在查找 Sphinx 文档索引"
+	},
+	"documentationMergedMode": {
+		"message": "合并为一篇 Markdown（配套插件不可用）"
+	},
+	"documentationSaved": {
+		"message": "说明文档已保存"
+	},
+	"documentationSavedChapters": {
+		"message": "已通过配套插件保存 $1 篇笔记"
+	},
+	"documentationSavedMerged": {
+		"message": "已保存为一篇合并笔记"
+	},
+	"documentationWriting": {
+		"message": "正在写入说明文档"
 	},
 	"disableHighlighter": {
 		"message": "禁用高亮"

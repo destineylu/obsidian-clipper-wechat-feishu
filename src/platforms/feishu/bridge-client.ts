@@ -11,6 +11,8 @@ import {
 	type FeishuBridgeQueueAssetsRequest,
 	type FeishuBridgeSessionStatus,
 	type FeishuBridgeUploadAssetResponse,
+	type DocumentBundleWriteRequest,
+	type DocumentBundleWriteResponse,
 } from './bridge-protocol';
 
 type FetchImplementation = (
@@ -205,6 +207,18 @@ export class FeishuBridgeClient {
 			{ method: 'DELETE', signal },
 			10_000
 		);
+	}
+
+	writeDocumentBundle(
+		request: DocumentBundleWriteRequest,
+		signal?: AbortSignal
+	): Promise<DocumentBundleWriteResponse> {
+		return this.requestJson('/v1/document-bundles', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(request),
+			signal,
+		});
 	}
 
 	private async requestJson<T>(

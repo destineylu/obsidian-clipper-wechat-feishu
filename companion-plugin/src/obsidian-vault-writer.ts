@@ -5,12 +5,17 @@ import type {
 	TFile,
 } from 'obsidian';
 
-import type { FeishuBridgeCommitResponse } from '../../src/platforms/feishu/bridge-protocol';
+import type {
+	DocumentBundleWriteRequest,
+	DocumentBundleWriteResponse,
+	FeishuBridgeCommitResponse,
+} from '../../src/platforms/feishu/bridge-protocol';
 import { BridgeProtocolError } from './transaction-store';
 import type {
 	BridgePluginSettings,
 	BridgeTransaction,
 	BridgeTransactionWriter,
+	DocumentBundleWriter,
 } from './types';
 
 function normalizeSafeVaultPath(rawPath: string, label: string): string {
@@ -53,7 +58,7 @@ function attachmentFolderForNote(rawNotePath: string): string {
 	return safeName || '未命名笔记';
 }
 
-export class ObsidianVaultWriter implements BridgeTransactionWriter {
+export class ObsidianVaultWriter implements BridgeTransactionWriter, DocumentBundleWriter {
 	private readonly attachmentFolder: string;
 	private readonly reservations = new Map<string, Set<string>>();
 	private readonly allReservedPaths = new Set<string>();
@@ -203,6 +208,49 @@ export class ObsidianVaultWriter implements BridgeTransactionWriter {
 			}
 			for (const file of createdAssets.reverse()) {
 				await this.app.fileManager.trashFile(file).catch(() => undefined);
+			}
+			throw error;
+		}
+	}
+
+	async commitDocumentBundle(
+		request: DocumentBundleWriteRequest
+	): Promise<DocumentBundleWriteResponse> {
+		const createdNotes: TFile[] = [];
+		const modifiedNotes: Array<{ file: TFile; original: string }> = [];
+		const prepared = request.notes.map(note => {
+			const path = this.validateNotePath(note.path);
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			if (existing && !isVaultFile(existing)) {
+				throw new BridgeProtocolError(
+					'note_path_conflict',
+					409,
+					'笔记路径被文件夹占用'
+				);
+			}
+			return { ...note, path, existing };
+		});
+
+		try {
+			for (const note of prepared) {
+				await this.ensureParentFolders(note.path);
+				if (note.existing) {
+					modifiedNotes.push({
+						file: note.existing,
+						original: await this.app.vault.read(note.existing),
+					});
+					await this.app.vault.modify(note.existing, note.content);
+				} else {
+					createdNotes.push(await this.app.vault.create(note.path, note.content));
+				}
+			}
+			return { notePaths: prepared.map(note => note.path) };
+		} catch (error) {
+			for (const note of [...modifiedNotes].reverse()) {
+				await this.app.vault.modify(note.file, note.original).catch(() => undefined);
+			}
+			for (const note of [...createdNotes].reverse()) {
+				await this.app.fileManager.trashFile(note).catch(() => undefined);
 			}
 			throw error;
 		}

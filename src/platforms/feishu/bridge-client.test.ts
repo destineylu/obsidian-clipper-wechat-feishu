@@ -169,6 +169,35 @@ describe('FeishuBridgeClient', () => {
 		expect(String(error)).not.toContain('must-not-leak');
 	});
 
+	test('writes a document bundle as one authenticated JSON request', async () => {
+		const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+			notePaths: ['Docs/Index.md'],
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' },
+		}));
+		const client = new FeishuBridgeClient({
+			endpoint: 'http://127.0.0.1:27124',
+			pairingToken: 'test-token',
+			fetchImpl,
+		});
+
+		await expect(client.writeDocumentBundle({
+			behavior: 'overwrite',
+			notes: [{ path: 'Docs/Index.md', content: '# Index' }],
+		})).resolves.toEqual({ notePaths: ['Docs/Index.md'] });
+		expect(fetchImpl).toHaveBeenCalledWith(
+			'http://127.0.0.1:27124/v1/document-bundles',
+			expect.objectContaining({
+				method: 'POST',
+				headers: expect.objectContaining({
+					Authorization: 'Bearer test-token',
+					'Content-Type': 'application/json',
+				}),
+			})
+		);
+	});
+
 	test('rejects an empty pairing token before making a request', () => {
 		expect(() => new FeishuBridgeClient({
 			endpoint: 'http://127.0.0.1:27124',

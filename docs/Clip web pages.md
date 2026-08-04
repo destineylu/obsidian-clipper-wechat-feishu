@@ -21,6 +21,34 @@ By default Web Clipper attempts to intelligently extract only the main article c
 - If a selection is present, it uses the selection. You can use `Ctrl/Cmd+A` to select the entire page.
 - If any [[Highlight web pages|highlights]] are present, it uses the highlights.
 
+## Capture an entire documentation site
+
+For Sphinx documentation sites, choose the visible **Clip entire
+documentation** action above **Add to Obsidian**, or use the same action in its
+menu. Web Clipper reads the
+site's version-local `searchindex.js`, shows the detected page count and output
+mode, and asks for confirmation before it fetches any chapter pages.
+
+With the paired desktop **Clipper Attachment Bridge** plugin running, Web
+Clipper writes one Markdown note per chapter and creates
+`00 - Documentation index.md`. Web Clipper also reads common Sphinx navigation
+trees: the index uses nested Wiki links, child pages use matching subfolders,
+and merged output keeps page and in-page heading levels. When navigation markup
+is unavailable, hierarchy falls back to Sphinx `docname` paths. Notes with the
+same paths are overwritten so the documentation can be refreshed;
+unrelated notes and chapters that disappeared from the website are never
+deleted automatically.
+
+If the companion plugin is not paired, unavailable, connected to a different
+Vault, or too old to advertise document-bundle support, Web Clipper saves one
+merged Markdown note through the normal clipping transport. The confirmation
+dialog identifies this fallback before collection starts.
+
+The initial implementation is limited to Sphinx sites, 100 source pages, three
+concurrent page requests, and 20 MiB of Markdown for chapter-folder writes.
+Only pages on the same origin and beneath the detected documentation root are
+accepted. Images continue to use their original web URLs.
+
 ## Download images
 
 Images are not automatically downloaded when you use Web Clipper. Instead, images link to their web-based URL. This saves space in your vault but it means the images will not be accessible offline, or if the URL stops working.

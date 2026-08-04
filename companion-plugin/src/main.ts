@@ -100,6 +100,7 @@ export default class ClipperAttachmentBridgePlugin extends Plugin {
 				pairingTokenHash: this.settings.pairingTokenHash,
 				vaultName: this.app.vault.getName(),
 				store,
+				documentBundleWriter: writer,
 				resumable: {
 					store: sessionStore,
 					limits: {

@@ -181,4 +181,39 @@ describe('ObsidianVaultWriter', () => {
 			'Attachments/Web Clipper/教程 -1 -测试-/-- scene -01--transact-2.mp4'
 		);
 	});
+
+	test('writes a document bundle and rolls every change back on failure', async () => {
+		const fake = createFakeApp();
+		await fake.vault.create('Docs/Existing.md', '# Original');
+		const writer = new ObsidianVaultWriter(fake.app, settings);
+
+		await expect(writer.commitDocumentBundle({
+			behavior: 'overwrite',
+			notes: [
+				{ path: 'Docs/Existing.md', content: '# Updated' },
+				{ path: 'Docs/New.md', content: '# New' },
+			],
+		})).resolves.toEqual({
+			notePaths: ['Docs/Existing.md', 'Docs/New.md'],
+		});
+		expect(fake.files.get('Docs/Existing.md')?.text).toBe('# Updated');
+		expect(fake.files.get('Docs/New.md')?.text).toBe('# New');
+
+		const originalCreate = fake.vault.create.getMockImplementation();
+		fake.vault.create.mockImplementation(async (path: string, text: string) => {
+			if (path.endsWith('Failure.md')) throw new Error('disk full');
+			return originalCreate!(path, text);
+		});
+		await expect(writer.commitDocumentBundle({
+			behavior: 'overwrite',
+			notes: [
+				{ path: 'Docs/Existing.md', content: '# Broken update' },
+				{ path: 'Docs/Created-before-failure.md', content: '# Temporary' },
+				{ path: 'Docs/Failure.md', content: '# Failure' },
+			],
+		})).rejects.toThrow('disk full');
+
+		expect(fake.files.get('Docs/Existing.md')?.text).toBe('# Updated');
+		expect(fake.files.has('Docs/Created-before-failure.md')).toBe(false);
+	});
 });
