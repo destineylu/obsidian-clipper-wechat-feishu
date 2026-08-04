@@ -64,6 +64,55 @@ WeChat Official Account images are usually saved as remote `mmbiz.qpic.cn` links
 
 See the [Feishu media storage guide](./docs/feishu-media-storage.md) for complete companion installation, migration behavior, and troubleshooting.
 
+### Capture an entire documentation site
+
+The extension can save a complete Sphinx documentation site, including its
+chapter pages and navigation hierarchy. This is separate from normal single-page
+clipping.
+
+#### Chapter-by-chapter mode (recommended)
+
+1. Install and enable the desktop `Clipper Attachment Bridge` companion plugin.
+   It is not listed in Obsidian Community Plugins; follow the installation steps
+   above or the [complete guide](./docs/feishu-media-storage.md).
+2. In Web Clipper **Settings → General → Feishu / Lark**, enter the bridge
+   endpoint (normally `http://127.0.0.1:27125`) and pairing token, then click
+   **Test connection**. The selected Vault must be the Vault currently open in
+   Obsidian.
+3. Open any page under the Sphinx documentation site, such as
+   `https://docs.datasette.io/en/stable/`.
+4. Open Web Clipper and wait for extraction to finish. On a recognized Sphinx
+   page, click the separate **收藏整个说明文档** button immediately above the
+   purple **Add to Obsidian** button.
+5. Confirm the detected title, page count and output mode. The extension then
+   discovers the Sphinx search index, fetches the chapter pages, and writes the
+   notes to the selected Vault and folder.
+
+The companion mode creates one Markdown note per page plus
+`00 - Documentation index.md`. The index follows the site's navigation when it
+can be read: nested sidebar entries become nested Wiki links, child pages are
+written into parent folders, and caption/group entries are retained as folder
+headings. Pages not present in the sidebar are grouped under `Other pages`; if
+the sidebar cannot be parsed, Sphinx `docname` paths provide the fallback
+hierarchy. Re-running the same collection overwrites notes with the same paths,
+but never deletes unrelated notes.
+
+#### Merged-note mode (without the companion plugin)
+
+If the bridge is unavailable, unpaired, connected to another Vault, or too old
+to support document bundles, the confirmation dialog explicitly reports the
+fallback **one merged Markdown note** mode. The entire site is saved as one
+note in navigation order. Page titles become heading levels, and in-page
+headings are nested underneath their page title without duplicating it.
+
+#### If the button is missing
+
+The action is shown only when the current page looks like Sphinx documentation.
+Refresh the page and reopen Web Clipper, then check that the URL is an ordinary
+`http://` or `https://` page rather than a PDF viewer or browser-internal page.
+The collector accepts only pages on the same origin and within the detected
+documentation root, and currently supports up to 100 source pages.
+
 ### WeChat Official Account article extraction
 
 WeChat Official Account articles rely heavily on lazy-loaded images and custom media containers. The official generic extractor can keep only the first image on some posts, or remove image placeholders entirely. This fork adds WeChat-specific handling:

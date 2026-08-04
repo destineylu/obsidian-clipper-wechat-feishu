@@ -34,14 +34,13 @@ documentation root.
 2. Open Web Clipper and wait for the page preview to finish. The extension
    detects Sphinx pages by their documentation metadata; the action is not shown
    on ordinary web pages.
-3. Click the small **▼** on the right side of the purple **Add to Obsidian**
-   button.
-4. Choose **收藏整个说明文档** from the menu.
+3. Click the separate **收藏整个说明文档** button immediately above the purple
+   **Add to Obsidian** button.
 5. Review the detected title, page count and save mode in the confirmation
    dialog, then click **OK**. The progress panel reports discovery, collection
    and writing separately.
 
-If the menu item is missing, refresh the documentation page and reopen the
+If the separate button is missing, refresh the documentation page and reopen the
 extension. The current page must be served over `http://` or `https://`, and its
 HTML must contain Sphinx metadata. Browser-internal pages, PDF viewers and
 ordinary sites are not supported by this action.
