@@ -7,8 +7,8 @@ export const DOCUMENT_BUNDLE_MAX_PAGES = DOCUMENT_BUNDLE_MERGED_MAX_PAGES;
 export const DOCUMENT_COLLECTION_MAX_PAGES = 5_000;
 export const DOCUMENT_BUNDLE_FETCH_CONCURRENCY = 3;
 
-export type DocumentSourceKind = 'sphinx' | 'llms-txt' | 'llms-txt-generic' | 'google-devsite' | 'docusaurus';
-export type DocumentContentType = 'html' | 'markdown';
+export type DocumentSourceKind = 'sphinx' | 'llms-txt' | 'llms-txt-generic' | 'google-devsite' | 'docusaurus' | 'vitepress' | 'sidebar-html' | 'sitemap' | 'aliyun-dochelp';
+export type DocumentContentType = 'html' | 'markdown' | 'aliyun-json' | 'joycode-changelog-json';
 
 const GENERATED_SPHINX_DOCS = new Set([
 	'genindex',
@@ -27,7 +27,22 @@ export interface DocumentPageManifest {
 	title: string;
 	url: string;
 	fetchUrl?: string;
+	fetchOptions?: RequestInit;
 	contentType?: DocumentContentType;
+}
+
+export interface InteractiveDocumentationSnapshot {
+	url: string;
+	title: string;
+	html: string;
+}
+
+interface AliyunDocHelpNode {
+	title?: string;
+	url?: string;
+	alias?: string;
+	validDocument?: boolean;
+	children?: AliyunDocHelpNode[];
 }
 
 export interface DocumentNavigationNode {
@@ -76,7 +91,7 @@ export interface FetchTextResult {
 	error?: string;
 }
 
-export type FetchText = (url: string) => Promise<FetchTextResult>;
+export type FetchText = (url: string, options?: RequestInit) => Promise<FetchTextResult>;
 
 export function isLikelySphinxDocumentationHtml(html: string): boolean {
 	if (!html) return false;
@@ -113,6 +128,25 @@ export function detectDocumentSourceKind(
 	if (/Docusaurus(?:\s+v[\d.]+)?/i.test(html) || /id=["']__docusaurus["']/i.test(html)) {
 		return 'docusaurus';
 	}
+	if (/window\.__VP_SITE_DATA__\s*=\s*JSON\.parse\(/i.test(html) ||
+		(/class=["'][^"']*\bVPNavBar\b/i.test(html) && /class=["'][^"']*\bVPSidebar\b/i.test(html))) {
+		return 'vitepress';
+	}
+	if (
+		/id=["']nd-sidebar["']/i.test(html) ||
+		/<aside[^>]+class=["'][^"']*\bthin-scroll\b/i.test(html) ||
+		/<aside[^>]+class=["'][^"']*\bsidebar\b/i.test(html) ||
+		/<(?:nav|aside)[^>]+aria-label=["']Sidebar Navigation["']/i.test(html) ||
+		/<aside[^>]*>[\s\S]*?<button\b/i.test(html) ||
+		/(?:id|class)=["'][^"']*(?:sidebar|sider|navigation)[^"']*["'][^>]*>[\s\S]*?<a\b[^>]+href=/i.test(html) ||
+		/role=["'](?:navigation|tree)["'][^>]*>[\s\S]*?<a\b[^>]+href=/i.test(html) ||
+		/class=["'][^"']*navList[^"']*["'][^>]*>[\s\S]*?class=["'][^"']*menuItem[^"']*["']/i.test(html)
+	) {
+		return 'sidebar-html';
+	}
+	if (url.pathname.includes('/docs') && /<nav\b[^>]*>[\s\S]*?<a\b[^>]+href=/i.test(html)) {
+		return 'sidebar-html';
+	}
 	return null;
 }
 
@@ -128,6 +162,122 @@ function stableCollectionId(
 		hash = Math.imul(hash, 0x01000193);
 	}
 	return `${kind}-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function isAllowedDocumentationRedirect(root: URL, finalUrl: URL): boolean {
+	if (finalUrl.origin === root.origin) return true;
+	if (finalUrl.hostname === root.hostname &&
+		['http:', 'https:'].includes(finalUrl.protocol) && ['http:', 'https:'].includes(root.protocol)) return true;
+	// OpenAI currently serves some pages listed on developers.openai.com from
+	// the official learn.chatgpt.com documentation host.
+	return root.hostname === 'developers.openai.com' && finalUrl.hostname === 'learn.chatgpt.com';
+}
+
+export function buildInteractiveSidebarManifest(
+	currentUrl: string,
+	currentHtml: string,
+	snapshots: InteractiveDocumentationSnapshot[]
+): DocumentManifest {
+	const current = new URL(currentUrl);
+	const root = new URL(current.pathname.endsWith('/') ? current.pathname : `${current.pathname}/`, current.origin);
+	const title = plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation');
+	const pages: DocumentPageManifest[] = [];
+	const seen = new Set<string>();
+	for (const [index, snapshot] of snapshots.entries()) {
+		let url: URL;
+		try { url = new URL(snapshot.url); } catch { continue; }
+		if (url.origin !== current.origin || seen.has(url.toString())) continue;
+		seen.add(url.toString());
+		const fragment = url.hash.replace(/^#/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+		const path = url.pathname.replace(/^\/+|\/+$/g, '').replace(/[^a-zA-Z0-9_-]+/g, '-');
+		const docname = isSafeDocname(`${path || 'index'}${fragment ? `-${fragment}` : ''}`)
+			? `${path || 'index'}${fragment ? `-${fragment}` : ''}`
+			: `chapter-${index + 1}`;
+		pages.push({
+			docname,
+			title: plainTitle(snapshot.title, `Chapter ${index + 1}`),
+			url: url.toString(),
+			fetchUrl: url.toString(),
+			contentType: 'html',
+		});
+	}
+	if (pages.length === 0) throw new Error('No interactive documentation pages were captured');
+	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
+	const locale = vitePressLocale(currentUrl, currentHtml);
+	return {
+		kind: 'sidebar-html', title, rootUrl: root.toString(), locale,
+		collectionId: stableCollectionId('sidebar-html', root.toString(), locale),
+		pages,
+	};
+}
+
+function parseAliyunMenuPayload(source: string): AliyunDocHelpNode {
+	const outer = JSON.parse(source) as { data?: { Data?: string | AliyunDocHelpNode } };
+	const encoded = outer.data?.Data;
+	const root = typeof encoded === 'string' ? JSON.parse(encoded) as AliyunDocHelpNode : encoded;
+	if (!root || !Array.isArray(root.children)) throw new Error('阿里云百炼官方文档目录返回格式无效');
+	return root;
+}
+
+function aliyunMenuSelection(currentUrl: string): number {
+	const url = new URL(currentUrl);
+	const hashQuery = url.hash.includes('?') ? url.hash.slice(url.hash.indexOf('?') + 1) : '';
+	const hashParams = new URLSearchParams(hashQuery);
+	const type = hashParams.get('type') === 'app' ? 'app' : 'model';
+	const section = /^#\/api(?:\/|\?|$)/.test(url.hash) || url.searchParams.get('tab') === 'api'
+		? 'api'
+		: 'docs';
+	if (section === 'docs') return type === 'app' ? 1 : 0;
+	return type === 'app' ? 3 : 2;
+}
+
+function aliyunNodeNavigation(node: AliyunDocHelpNode, pages: DocumentPageManifest[]): DocumentNavigationNode | null {
+	const children = (node.children || [])
+		.map(child => aliyunNodeNavigation(child, pages))
+		.filter((child): child is DocumentNavigationNode => Boolean(child));
+	const alias = typeof node.alias === 'string' ? node.alias.replace(/^\/+|\/+$/g, '') : '';
+	const page = node.validDocument && alias
+		? pages.find(candidate => candidate.docname === alias)
+		: undefined;
+	if (!page && children.length === 0) return null;
+	return { title: plainTitle(node.title || page?.title || 'Documentation', 'Documentation'), docname: page?.docname, children };
+}
+
+export function buildAliyunDocHelpManifest(currentUrl: string, source: string): DocumentManifest {
+	const root = parseAliyunMenuPayload(source);
+	const selected = root.children?.[aliyunMenuSelection(currentUrl)];
+	if (!selected) throw new Error('未找到当前百炼文档分类的官方目录');
+	const pages: DocumentPageManifest[] = [];
+	const seen = new Set<string>();
+	const visit = (node: AliyunDocHelpNode) => {
+		const alias = typeof node.alias === 'string' ? node.alias.replace(/^\/+|\/+$/g, '') : '';
+		if (node.validDocument && alias && !seen.has(alias)) {
+			seen.add(alias);
+			const canonicalPath = node.url?.startsWith('/') ? node.url : `/zh/${alias}`;
+			pages.push({
+				docname: alias,
+				title: plainTitle(node.title || decodedPathTitle(alias, alias), decodedPathTitle(alias, alias)),
+				url: new URL(canonicalPath, 'https://help.aliyun.com').toString(),
+				fetchUrl: `https://help.aliyun.com/help/json/document_detail.json?alias=${encodeURIComponent(`/${alias}`)}&pageNum=1&pageSize=20&website=cn&language=zh&channel=`,
+				contentType: 'aliyun-json',
+			});
+		}
+		for (const child of node.children || []) visit(child);
+	};
+	visit(selected);
+	if (pages.length === 0) throw new Error('当前百炼文档分类的官方目录中没有可保存页面');
+	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
+	const rootUrl = new URL(selected.url || '/zh/model-studio/', 'https://help.aliyun.com').toString();
+	const navigation = aliyunNodeNavigation(selected, pages);
+	return {
+		kind: 'aliyun-dochelp',
+		title: plainTitle(selected.title || root.title || '阿里云百炼文档', '阿里云百炼文档'),
+		rootUrl,
+		locale: 'zh-cn',
+		collectionId: stableCollectionId('aliyun-dochelp', rootUrl, 'zh-cn'),
+		pages,
+		navigation: navigation ? [navigation] : undefined,
+	};
 }
 
 function decodeXmlText(value: string): string {
@@ -230,20 +380,27 @@ export function buildGenericLlmsTxtManifest(
 	const current = new URL(currentUrl);
 	const locale = currentHtml.match(/<html[^>]+lang=["']([^"']+)["']/i)?.[1] || 'und';
 	const currentLocaleSegment = current.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i)?.[1]?.toLowerCase();
-	const candidates: Array<{ link: LlmsTxtIndex['links'][number]; markdownUrl: URL }> = [];
+	const candidates: Array<{
+		link: LlmsTxtIndex['links'][number];
+		resourceUrl: URL;
+		contentType: DocumentContentType;
+	}> = [];
 	for (const link of index.links) {
-		let markdownUrl: URL;
-		try { markdownUrl = new URL(link.url); } catch { continue; }
-		if (markdownUrl.origin !== current.origin || !markdownUrl.pathname.endsWith('.md')) continue;
-		const linkLocaleSegment = markdownUrl.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i)?.[1]?.toLowerCase();
+		let resourceUrl: URL;
+		try { resourceUrl = new URL(link.url); } catch { continue; }
+		if (resourceUrl.origin !== current.origin) continue;
+		const lowerPath = resourceUrl.pathname.toLowerCase();
+		if (lowerPath.endsWith('/llms.txt') || lowerPath.endsWith('.xml') || lowerPath.endsWith('/robots.txt')) continue;
+		const contentType: DocumentContentType = lowerPath.endsWith('.md') ? 'markdown' : 'html';
+		const linkLocaleSegment = resourceUrl.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i)?.[1]?.toLowerCase();
 		if (currentLocaleSegment && linkLocaleSegment && linkLocaleSegment !== currentLocaleSegment) continue;
-		markdownUrl.search = '';
-		markdownUrl.hash = '';
-		candidates.push({ link, markdownUrl });
+		resourceUrl.search = '';
+		resourceUrl.hash = '';
+		candidates.push({ link, resourceUrl, contentType });
 	}
-	const commonSegments = candidates[0]?.markdownUrl.pathname.split('/').filter(Boolean).slice(0, -1) || [];
+	const commonSegments = candidates[0]?.resourceUrl.pathname.split('/').filter(Boolean).slice(0, -1) || [];
 	for (const candidate of candidates.slice(1)) {
-		const segments = candidate.markdownUrl.pathname.split('/').filter(Boolean).slice(0, -1);
+		const segments = candidate.resourceUrl.pathname.split('/').filter(Boolean).slice(0, -1);
 		while (commonSegments.length > 0 && commonSegments.some((segment, index) => segments[index] !== segment)) {
 			commonSegments.pop();
 		}
@@ -251,16 +408,18 @@ export function buildGenericLlmsTxtManifest(
 	const root = new URL(`/${commonSegments.join('/')}${commonSegments.length ? '/' : ''}`, current.origin);
 	const pages: DocumentPageManifest[] = [];
 	const seen = new Set<string>();
-	for (const { link, markdownUrl } of candidates) {
-		const relative = markdownUrl.pathname.slice(root.pathname.length, -3);
-		if (!isSafeDocname(relative) || seen.has(relative)) continue;
-		seen.add(relative);
+	for (const { link, resourceUrl, contentType } of candidates) {
+		const rawRelative = resourceUrl.pathname.slice(root.pathname.length);
+		const relative = contentType === 'markdown' ? rawRelative.slice(0, -3) : rawRelative.replace(/\/$/, '') || 'index';
+		const docname = normalizedSafeDocname(relative);
+		if (!docname || seen.has(docname)) continue;
+		seen.add(docname);
 		pages.push({
-			docname: relative,
-			title: plainTitle(link.title, decodedPathTitle(relative, relative)),
-			url: new URL(relative, root).toString(),
-			fetchUrl: markdownUrl.toString(),
-			contentType: 'markdown',
+			docname,
+			title: plainTitle(link.title, decodedPathTitle(docname, docname)),
+			url: contentType === 'markdown' ? new URL(rawRelative.slice(0, -3), root).toString() : resourceUrl.toString(),
+			fetchUrl: resourceUrl.toString(),
+			contentType,
 		});
 	}
 	if (pages.length === 0) throw new Error('llms.txt contains no pages under the current documentation root');
@@ -281,6 +440,43 @@ export function parseSitemapLocations(source: string): string[] {
 		if (/^https?:\/\//i.test(value)) locations.push(value);
 	}
 	return locations;
+}
+
+export function buildLocaleSitemapManifest(
+	currentUrl: string,
+	currentHtml: string,
+	locations: string[]
+): DocumentManifest {
+	const current = new URL(currentUrl);
+	const locale = current.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i)?.[1];
+	if (!locale) throw new Error('Current documentation URL has no locale root');
+	const root = new URL(`/${locale}/`, current.origin);
+	const pages: DocumentPageManifest[] = [];
+	const seen = new Set<string>();
+	for (const location of locations) {
+		let url: URL;
+		try { url = new URL(location); } catch { continue; }
+		url.search = '';
+		url.hash = '';
+		if (url.origin !== current.origin ||
+			(url.pathname !== root.pathname.slice(0, -1) && !url.pathname.startsWith(root.pathname))) continue;
+		const relative = url.pathname === root.pathname.slice(0, -1)
+			? 'index'
+			: url.pathname.slice(root.pathname.length).replace(/\/$/, '') || 'index';
+		const docname = normalizedSafeDocname(relative);
+		if (!docname || seen.has(docname)) continue;
+		seen.add(docname);
+		pages.push({ docname, title: decodedPathTitle(docname, docname), url: url.toString(), contentType: 'html' });
+	}
+	if (pages.length === 0) throw new Error('Sitemap contains no pages for the current locale');
+	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
+	pages.sort((left, right) => left.docname === 'index' ? -1 : right.docname === 'index' ? 1 : left.docname.localeCompare(right.docname));
+	const title = plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation');
+	return {
+		kind: 'sitemap', title, rootUrl: root.toString(), locale,
+		collectionId: stableCollectionId('sitemap', root.toString(), locale),
+		pages, navigation: fallbackNavigation(pages),
+	};
 }
 
 export function buildClaudeSitemapManifest(
@@ -332,7 +528,8 @@ export function buildDocusaurusManifest(
 	const pathLocale = current.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i)?.[1];
 	const locale = (htmlLocale || pathLocale || 'en').toLowerCase();
 	const localePrefix = locale === 'en' ? '' : `/${pathLocale || locale}`;
-	const root = new URL(`${localePrefix || ''}/`, current.origin);
+	const docsRootPath = current.pathname.match(/^(.*\/docs\/)/i)?.[1] || '';
+	const sourceRootPath = docsRootPath || `${localePrefix || ''}/`;
 	const titleFromHtml = currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation';
 	const baseTitle = plainTitle(titleFromHtml.replace(/\s*[|–—-]\s*[^|–—]+$/, ''), 'Documentation');
 	const title = locale === 'en' ? baseTitle : `${baseTitle} - ${locale}`;
@@ -343,26 +540,321 @@ export function buildDocusaurusManifest(
 		try { canonical = new URL(rawLocation); } catch { continue; }
 		canonical.hash = '';
 		canonical.search = '';
-		if (canonical.origin !== current.origin) continue;
-		let relative = canonical.pathname.replace(/^\/+|\/+$/g, '') || 'index';
-		if (localePrefix && relative.startsWith(`${localePrefix.slice(1)}/`)) {
+		if (canonical.origin !== current.origin ||
+			(docsRootPath && canonical.pathname !== sourceRootPath.replace(/\/$/, '') && !canonical.pathname.startsWith(sourceRootPath))) continue;
+		let relative = docsRootPath
+			? canonical.pathname.slice(sourceRootPath.length).replace(/^\/+|\/+$/g, '') || 'index'
+			: canonical.pathname.replace(/^\/+|\/+$/g, '') || 'index';
+		if (!docsRootPath && localePrefix && relative.startsWith(`${localePrefix.slice(1)}/`)) {
 			relative = relative.slice(localePrefix.length).replace(/^\/+/, '') || 'index';
 		}
+		if (current.hostname === 'joycode.jd.com' && relative === 'tags') continue;
 		if (!isSafeDocname(relative) || seen.has(relative)) continue;
 		seen.add(relative);
-		const localizedPath = relative === 'index'
-			? `${localePrefix || ''}/`
-			: `${localePrefix || ''}/${relative}`;
+		const localizedPath = docsRootPath
+			? (relative === 'index' ? sourceRootPath : `${sourceRootPath}${relative}`)
+			: (relative === 'index' ? `${localePrefix || ''}/` : `${localePrefix || ''}/${relative}`);
 		const pageUrl = new URL(localizedPath, current.origin).toString();
-		pages.push({ docname: relative, title: decodedPathTitle(relative, relative), url: pageUrl, contentType: 'html' });
+		pages.push(current.hostname === 'joycode.jd.com' && relative === 'changelog'
+			? {
+				docname: relative,
+				title: 'JoyCode IDE 版本变更记录',
+				url: pageUrl,
+				fetchUrl: 'https://joycode.jd.com/api/saas/ideVersion/v1/ideVersionList',
+				fetchOptions: {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ pluginId: 'joycoder-ide', plat: 'IDE' }),
+				},
+				contentType: 'joycode-changelog-json',
+			}
+			: { docname: relative, title: decodedPathTitle(relative, relative), url: pageUrl, contentType: 'html' });
 	}
 	if (pages.length === 0) throw new Error('Docusaurus sitemap contains no documentation pages');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
 	pages.sort((left, right) => left.docname === 'index' ? -1 : right.docname === 'index' ? 1 : left.docname.localeCompare(right.docname));
 	return {
-		kind: 'docusaurus', title, rootUrl: root.toString(), locale,
-		collectionId: stableCollectionId('docusaurus', root.toString(), locale),
+		kind: 'docusaurus', title, rootUrl: new URL(sourceRootPath, current.origin).toString(), locale,
+		collectionId: stableCollectionId('docusaurus', new URL(sourceRootPath, current.origin).toString(), locale),
 		pages, navigation: fallbackNavigation(pages),
+	};
+}
+
+interface VitePressSidebarItemData {
+	text?: unknown;
+	link?: unknown;
+	items?: unknown;
+}
+
+function parseVitePressSiteData(html: string): Record<string, unknown> | null {
+	const payload = html.match(/window\.__VP_SITE_DATA__\s*=\s*JSON\.parse\(("(?:\\.|[^"\\])*")\)/i)?.[1];
+	if (!payload) return null;
+	try {
+		const decoded = JSON.parse(payload);
+		const data = JSON.parse(decoded);
+		return data && typeof data === 'object' ? data as Record<string, unknown> : null;
+	} catch {
+		return null;
+	}
+}
+
+function vitePressLocale(currentUrl: string, currentHtml: string): string {
+	return (currentHtml.match(/<html[^>]+lang=["']([^"']+)["']/i)?.[1] ||
+		new URL(currentUrl).pathname.match(/\/([a-z]{2}(?:-[a-z]{2})?)(?:\/|$)/i)?.[1] || 'en').toLowerCase();
+}
+
+function vitePressConfig(data: Record<string, unknown>, locale: string): Record<string, unknown> {
+	const locales = data.locales && typeof data.locales === 'object'
+		? data.locales as Record<string, unknown>
+		: {};
+	const localeConfig = Object.entries(locales).find(([key]) => key.toLowerCase() === locale)?.[1];
+	if (localeConfig && typeof localeConfig === 'object') {
+		const themeConfig = (localeConfig as Record<string, unknown>).themeConfig;
+		if (themeConfig && typeof themeConfig === 'object') return themeConfig as Record<string, unknown>;
+	}
+	const themeConfig = data.themeConfig;
+	return themeConfig && typeof themeConfig === 'object' ? themeConfig as Record<string, unknown> : {};
+}
+
+function vitePressSidebarItems(
+	sidebar: unknown,
+	currentPath: string,
+	basePath: string
+): VitePressSidebarItemData[] {
+	if (Array.isArray(sidebar)) return sidebar as VitePressSidebarItemData[];
+	if (!sidebar || typeof sidebar !== 'object') return [];
+	const entries = Object.entries(sidebar as Record<string, unknown>);
+	const normalizedPath = currentPath.replace(/\.html$/, '').replace(/\/$/, '') || '/';
+	const matching = entries
+		.filter(([key]) => normalizedPath.startsWith(key.replace(/\/$/, '') || '/'))
+		.sort((left, right) => right[0].length - left[0].length)[0];
+	const selected = matching?.[1] || entries[0]?.[1];
+	return Array.isArray(selected) ? selected as VitePressSidebarItemData[] :
+		selected && typeof selected === 'object' ? [selected as VitePressSidebarItemData] : [];
+}
+
+function vitePressPageUrl(rawLink: string, origin: string, basePath: string): URL | null {
+	let url: URL;
+	try {
+		if (/^https?:\/\//i.test(rawLink)) url = new URL(rawLink);
+		else if (rawLink.startsWith('/')) {
+			const path = rawLink.startsWith(basePath) ? rawLink : `${basePath}${rawLink.slice(1)}`;
+			url = new URL(path, origin);
+		} else url = new URL(rawLink, `${origin}${basePath}`);
+	} catch {
+		return null;
+	}
+	if (url.origin !== origin || !url.pathname.startsWith(basePath)) return null;
+	url.search = '';
+	url.hash = '';
+	if (url.pathname.endsWith('/')) url.pathname += 'index.html';
+	else if (!/\.[a-z0-9]+$/i.test(url.pathname)) url.pathname += '.html';
+	return url;
+}
+
+function vitePressCommonBasePath(urls: URL[], currentUrl: string): string {
+	const pathSegments = urls.map(url => url.pathname.split('/').filter(Boolean).slice(0, -1));
+	const currentSegments = new URL(currentUrl).pathname.split('/').filter(Boolean).slice(0, -1);
+	const candidates = pathSegments.length > 0 ? pathSegments : [currentSegments];
+	const common: string[] = [];
+	for (let index = 0; index < Math.min(...candidates.map(parts => parts.length)); index += 1) {
+		const segment = candidates[0][index];
+		if (!candidates.every(parts => parts[index] === segment)) break;
+		common.push(segment);
+	}
+	return `/${common.join('/')}${common.length > 0 ? '/' : ''}`;
+}
+
+export function buildHtmlSidebarManifest(
+	currentUrl: string,
+	currentHtml: string,
+	documentParser: DocumentParser
+): DocumentManifest {
+	const current = new URL(currentUrl);
+	const document = documentParser.parseFromString(currentHtml, 'text/html') as Document;
+	const selectors = [
+		'#nd-sidebar',
+		'aside.thin-scroll',
+		'aside.sidebar',
+		'nav[aria-label="Sidebar Navigation"]',
+		'[role="navigation"]',
+		'[role="tree"]',
+		'[class*="sidebar"]',
+		'[class*="Sidebar"]',
+		'[class*="sider"]',
+		'[class*="Sider"]',
+		'[class*="navList"]',
+		'aside',
+		'nav',
+	];
+	const containers = selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)));
+	const container = containers.sort((left, right) =>
+		right.querySelectorAll('a[href]').length - left.querySelectorAll('a[href]').length
+	)[0];
+	if (!container) throw new Error('Official documentation sidebar was not found');
+	const links = Array.from(container.querySelectorAll('a[href]'))
+		.map(anchor => ({ href: anchor.getAttribute('href') || '', title: plainTitle(anchor.textContent || '', '') }));
+	const menuItems = container.querySelectorAll('[class*="menuItem"], button').length;
+	if (links.length < 2 && menuItems >= 2) {
+		const pageUrl = new URL(currentUrl);
+		return {
+			kind: 'sidebar-html',
+			title: plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation'),
+			rootUrl: pageUrl.toString(),
+			locale: vitePressLocale(currentUrl, currentHtml),
+			collectionId: stableCollectionId('sidebar-html', pageUrl.toString(), vitePressLocale(currentUrl, currentHtml)),
+			pages: [{
+				docname: 'index',
+				title: plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation'),
+				url: pageUrl.toString(),
+				contentType: 'html',
+			}],
+		};
+	}
+	const urls = links.map(link => {
+		try { return new URL(link.href, currentUrl); } catch { return null; }
+	}).filter((url): url is URL => url !== null && url.origin === current.origin);
+	const rootPath = vitePressCommonBasePath(urls, currentUrl);
+	const root = new URL(rootPath, current.origin);
+	const pages: DocumentPageManifest[] = [];
+	const seen = new Set<string>();
+	for (const link of links) {
+		let url: URL;
+		try { url = new URL(link.href, currentUrl); } catch { continue; }
+		url.search = '';
+		url.hash = '';
+		if (url.origin !== root.origin || !url.pathname.startsWith(root.pathname)) continue;
+		const relative = url.pathname.slice(root.pathname.length).replace(/^\/+|\/+$/g, '') || 'index';
+		const docname = normalizedSafeDocname(relative);
+		if (!docname || seen.has(url.toString())) continue;
+		seen.add(url.toString());
+		pages.push({
+			docname,
+			title: link.title || decodedPathTitle(docname, docname),
+			url: url.toString(),
+			contentType: 'html',
+		});
+	}
+	if (pages.length === 0) throw new Error('Official documentation sidebar contains no same-origin pages');
+	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
+	const locale = vitePressLocale(currentUrl, currentHtml);
+	const title = plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation');
+	return {
+		kind: 'sidebar-html',
+		title,
+		rootUrl: root.toString(),
+		locale,
+		collectionId: stableCollectionId('sidebar-html', root.toString(), locale),
+		pages,
+	};
+}
+
+function buildVitePressDomPages(
+	currentUrl: string,
+	currentHtml: string,
+	documentParser?: DocumentParser
+): { pages: DocumentPageManifest[]; rootUrl: string } {
+	if (!documentParser) throw new Error('VitePress site data was not found');
+	const document = documentParser.parseFromString(currentHtml, 'text/html') as Document;
+	const current = new URL(currentUrl);
+	const links = Array.from(document.querySelectorAll('.VPSidebar a[href]'))
+		.map(anchor => ({
+			href: anchor.getAttribute('href') || '',
+			title: plainTitle(anchor.textContent || '', ''),
+		}));
+	const urls = links.map(link => {
+		try { return new URL(link.href, currentUrl); } catch { return null; }
+	}).filter((url): url is URL => url !== null && url.origin === current.origin);
+	const basePath = vitePressCommonBasePath(urls, currentUrl);
+	const base = new URL(basePath, current.origin);
+	const pages: DocumentPageManifest[] = [];
+	const seen = new Set<string>();
+	for (const link of links) {
+		const pageUrl = vitePressPageUrl(link.href, current.origin, base.pathname);
+		if (!pageUrl || seen.has(pageUrl.toString())) continue;
+		const relative = pageUrl.pathname.slice(base.pathname.length).replace(/\.html$/, '').replace(/\/$/, '') || 'index';
+		if (!isSafeDocname(relative)) continue;
+		seen.add(pageUrl.toString());
+		pages.push({
+			docname: relative,
+			title: link.title || decodedPathTitle(relative, relative),
+			url: pageUrl.toString(),
+			contentType: 'html',
+		});
+	}
+	return { pages, rootUrl: base.toString() };
+}
+
+export function buildVitePressManifest(
+	currentUrl: string,
+	currentHtml: string,
+	documentParser?: DocumentParser
+): DocumentManifest {
+	const current = new URL(currentUrl);
+	const data = parseVitePressSiteData(currentHtml);
+	const locale = vitePressLocale(currentUrl, currentHtml);
+	if (!data) {
+		const fallback = buildVitePressDomPages(currentUrl, currentHtml, documentParser);
+		if (fallback.pages.length === 0) throw new Error('VitePress sidebar contains no documentation pages');
+		return {
+			kind: 'vitepress',
+			title: plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation'),
+			rootUrl: fallback.rootUrl,
+			locale,
+			collectionId: stableCollectionId('vitepress', fallback.rootUrl, locale),
+			pages: fallback.pages,
+		};
+	}
+	const rawBase = typeof data.base === 'string' ? data.base : '/';
+	const base = new URL(rawBase, current.origin);
+	base.search = '';
+	base.hash = '';
+	if (!base.pathname.endsWith('/')) base.pathname += '/';
+	const config = vitePressConfig(data, locale);
+	const sidebar = vitePressSidebarItems(config.sidebar, current.pathname, base.pathname);
+	const pages: DocumentPageManifest[] = [];
+	const seen = new Set<string>();
+	const addItem = (item: VitePressSidebarItemData): DocumentNavigationNode | null => {
+		const rawLink = typeof item.link === 'string' ? item.link : '';
+		const pageUrl = rawLink ? vitePressPageUrl(rawLink, current.origin, base.pathname) : null;
+		const page = pageUrl && pageUrl.pathname.startsWith(base.pathname)
+			? (() => {
+				const relative = pageUrl.pathname.slice(base.pathname.length).replace(/\.html$/, '').replace(/\/$/, '') || 'index';
+				if (!isSafeDocname(relative)) return null;
+				const key = pageUrl.toString();
+				if (seen.has(key)) return pages.find(candidate => candidate.url === key) || null;
+				const created = {
+					docname: relative,
+					title: plainTitle(typeof item.text === 'string' ? item.text : '', decodedPathTitle(relative, relative)),
+					url: key,
+					contentType: 'html' as const,
+				};
+				seen.add(key);
+				pages.push(created);
+				return created;
+			})()
+			: null;
+		const children = Array.isArray(item.items)
+			? item.items.map(child => child && typeof child === 'object' ? addItem(child as VitePressSidebarItemData) : null).filter(Boolean) as DocumentNavigationNode[]
+			: [];
+		if (!page && children.length === 0) return null;
+		return page
+			? { docname: page.docname, title: page.title, children }
+			: { title: plainTitle(typeof item.text === 'string' ? item.text : '', 'Section'), children };
+	};
+	const navigation = sidebar.map(item => item && typeof item === 'object' ? addItem(item) : null).filter(Boolean) as DocumentNavigationNode[];
+	if (pages.length === 0) throw new Error('VitePress sidebar contains no documentation pages');
+	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
+	const titleFromHtml = currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation';
+	const title = plainTitle(titleFromHtml.replace(/\s*[|–—-]\s*[^|–—]+$/, ''), 'Documentation');
+	return {
+		kind: 'vitepress',
+		title: locale === 'en' ? title : `${title} - ${locale}`,
+		rootUrl: base.toString(),
+		locale,
+		collectionId: stableCollectionId('vitepress', base.toString(), locale),
+		pages,
+		navigation,
 	};
 }
 
@@ -483,6 +975,18 @@ function isSafeDocname(docname: string): boolean {
 		!docname.includes('#') &&
 		!docname.split('/').some(segment => !segment || segment === '.' || segment === '..') &&
 		/^[\p{L}\p{N}_./-]+$/u.test(docname);
+}
+
+function normalizedSafeDocname(docname: string): string | null {
+	const normalized = docname.split('/').map(segment => {
+		let decoded = segment;
+		try { decoded = decodeURIComponent(segment); } catch { /* keep the encoded segment */ }
+		return decoded
+			.replace(/[^\p{L}\p{N}_.-]+/gu, '-')
+			.replace(/-+/g, '-')
+			.replace(/^-+|-+$/g, '');
+	}).filter(Boolean).join('/');
+	return isSafeDocname(normalized) ? normalized : null;
 }
 
 function plainTitle(title: string, fallback: string): string {
@@ -975,7 +1479,68 @@ async function discoverGenericLlmsTxtDocumentation(options: {
 	if (!response.ok) throw new Error(`Failed to fetch llms.txt (${response.status || response.error || 'network error'})`);
 	const finalUrl = new URL(response.finalUrl || indexUrl);
 	if (finalUrl.origin !== new URL(options.currentUrl).origin) throw new Error('llms.txt redirected to another origin');
-	return buildGenericLlmsTxtManifest(options.currentUrl, options.currentHtml, parseLlmsTxt(response.text));
+	const rootIndex = parseLlmsTxt(response.text);
+	const combinedLinks = [...rootIndex.links];
+	const origin = new URL(options.currentUrl).origin;
+	const visited = new Set([finalUrl.toString()]);
+	const queue = rootIndex.links.map(link => link.url).filter(url => {
+		try {
+			const candidate = new URL(url);
+			return candidate.origin === origin && candidate.pathname.endsWith('/llms.txt');
+		} catch { return false; }
+	});
+	while (queue.length > 0) {
+		if (visited.size >= 32) throw new Error('llms.txt contains too many nested indexes');
+		const nestedUrl = queue.shift()!;
+		if (visited.has(nestedUrl)) continue;
+		visited.add(nestedUrl);
+		const nestedResponse = await options.fetchText(nestedUrl);
+		if (!nestedResponse.ok) continue;
+		const nestedFinalUrl = new URL(nestedResponse.finalUrl || nestedUrl);
+		if (nestedFinalUrl.origin !== origin) continue;
+		let nestedIndex: LlmsTxtIndex;
+		try { nestedIndex = parseLlmsTxt(nestedResponse.text); } catch { continue; }
+		combinedLinks.push(...nestedIndex.links);
+		for (const link of nestedIndex.links) {
+			try {
+				const candidate = new URL(link.url);
+				if (candidate.origin === origin && candidate.pathname.endsWith('/llms.txt') && !visited.has(candidate.toString())) {
+					queue.push(candidate.toString());
+				}
+			} catch { /* ignore invalid nested links */ }
+		}
+	}
+	return buildGenericLlmsTxtManifest(options.currentUrl, options.currentHtml, {
+		title: rootIndex.title,
+		links: combinedLinks,
+	});
+}
+
+async function discoverHtmlSidebarDocumentation(options: {
+	currentUrl: string;
+	currentHtml: string;
+	fetchText: FetchText;
+	documentParser?: DocumentParser;
+}): Promise<DocumentManifest> {
+	const current = new URL(options.currentUrl);
+	if (/^\/[a-z]{2}(?:-[a-z]{2})?(?:\/|$)/i.test(current.pathname)) {
+		const sitemapUrl = new URL('/sitemap.xml', current.origin).toString();
+		const response = await options.fetchText(sitemapUrl);
+		if (response.ok) {
+			const finalUrl = new URL(response.finalUrl || sitemapUrl);
+			if (finalUrl.origin === current.origin) {
+				try {
+					return buildLocaleSitemapManifest(
+						options.currentUrl,
+						options.currentHtml,
+						parseSitemapLocations(response.text)
+					);
+				} catch { /* fall back to the rendered official sidebar */ }
+			}
+		}
+	}
+	if (!options.documentParser) throw new Error('A document parser is required for sidebar discovery');
+	return buildHtmlSidebarManifest(options.currentUrl, options.currentHtml, options.documentParser);
 }
 
 async function discoverGoogleDevsiteDocumentation(options: {
@@ -1049,6 +1614,16 @@ export const DOCUMENT_SOURCE_ADAPTERS: DocumentSourceAdapter[] = [
 		discover: options => discoverDocusaurusDocumentation(options),
 	},
 	{
+		kind: 'vitepress',
+		matches: (currentUrl, currentHtml) => detectDocumentSourceKind(currentUrl, currentHtml) === 'vitepress',
+		discover: async options => buildVitePressManifest(options.currentUrl, options.currentHtml, options.documentParser),
+	},
+	{
+		kind: 'sidebar-html',
+		matches: (currentUrl, currentHtml) => detectDocumentSourceKind(currentUrl, currentHtml) === 'sidebar-html',
+		discover: options => discoverHtmlSidebarDocumentation(options),
+	},
+	{
 		kind: 'llms-txt-generic',
 		matches: (currentUrl, currentHtml) => detectDocumentSourceKind(currentUrl, currentHtml) === 'llms-txt-generic',
 		discover: options => discoverGenericLlmsTxtDocumentation(options),
@@ -1093,17 +1668,22 @@ export async function collectDocumentPages(options: {
 	concurrency?: number;
 	onProgress?: (completed: number, total: number, page: DocumentPageManifest) => void;
 	seenSourceUrls?: Set<string>;
+	currentPageUrl?: string;
+	currentPageHtml?: string;
+	pageSnapshots?: Map<string, string>;
 }): Promise<CollectedDocumentPage[]> {
 	const sourcePages = options.pages || options.manifest.pages;
 	const results = new Array<CollectedDocumentPage | undefined>(sourcePages.length);
+	const defaultConcurrency = options.manifest.kind === 'aliyun-dochelp'
+		? 2
+		: DOCUMENT_BUNDLE_FETCH_CONCURRENCY;
 	const concurrency = Math.max(
 		1,
-		Math.min(options.concurrency || DOCUMENT_BUNDLE_FETCH_CONCURRENCY, 6)
+		Math.min(options.concurrency || defaultConcurrency, 6)
 	);
 	let nextIndex = 0;
 	let completed = 0;
 	const root = new URL(options.manifest.rootUrl);
-	const rootPath = root.pathname.replace(/\/+$/, '') || '/';
 
 	const worker = async () => {
 		while (true) {
@@ -1112,22 +1692,72 @@ export async function collectDocumentPages(options: {
 			if (pageIndex >= sourcePages.length) return;
 			const page = sourcePages[pageIndex];
 			const requestUrl = page.fetchUrl || page.url;
-			const response = await options.fetchText(requestUrl);
+			const snapshotHtml = options.pageSnapshots?.get(requestUrl);
+			let response: FetchTextResult = snapshotHtml
+				? { ok: true, status: 200, finalUrl: requestUrl, text: snapshotHtml }
+				: options.currentPageUrl === requestUrl && options.currentPageHtml
+				? { ok: true, status: 200, finalUrl: requestUrl, text: options.currentPageHtml }
+				: await options.fetchText(requestUrl, page.fetchOptions);
+			let aliyunPayload: { data?: { content?: string; title?: string } } | undefined;
+			if (page.contentType === 'aliyun-json') {
+				const retryDelays = [300, 700, 1_500];
+				for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+					try {
+						aliyunPayload = response.ok
+							? JSON.parse(response.text) as { data?: { content?: string; title?: string } }
+							: undefined;
+					} catch {
+						aliyunPayload = undefined;
+					}
+					if (aliyunPayload?.data?.content) break;
+					if (attempt === retryDelays.length) {
+						if (!response.ok) {
+							throw new Error(`阿里云文档正文请求失败：${page.title}（${response.status || response.error || '网络错误'}）`);
+						}
+						throw new Error(`阿里云文档正文连续 ${retryDelays.length + 1} 次返回为空：${page.title}`);
+					}
+					await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+					const retryUrl = new URL(requestUrl);
+					retryUrl.searchParams.set('_clipper_retry', `${Date.now()}-${pageIndex}-${attempt + 1}`);
+					response = await options.fetchText(retryUrl.toString());
+				}
+			}
 			if (!response.ok) {
 				throw new Error(`Failed to fetch ${page.title} (${response.status || response.error || 'network error'})`);
 			}
 			const finalUrl = new URL(response.finalUrl || requestUrl);
-			const finalPath = finalUrl.pathname.replace(/\/+$/, '') || '/';
-			if (
-				finalUrl.origin !== root.origin ||
-				(finalPath !== rootPath && !finalUrl.pathname.startsWith(root.pathname))
-			) {
-				throw new Error(`Documentation page redirected outside its root: ${requestUrl}`);
+			if (!isAllowedDocumentationRedirect(root, finalUrl)) {
+				throw new Error(`Documentation page redirected outside its origin: ${requestUrl}`);
 			}
-			const sourceUrl = page.contentType === 'markdown' ? page.url : finalUrl.toString();
+			const sourceUrl = page.contentType === 'markdown' || page.contentType === 'aliyun-json' || page.contentType === 'joycode-changelog-json'
+				? page.url
+				: finalUrl.toString();
+			let responseText = response.text;
+			if (page.contentType === 'aliyun-json') {
+				const title = aliyunPayload?.data?.title || page.title;
+				responseText = `<!doctype html><html lang="zh-CN"><head><title>${title.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] || character)}</title></head><body><main>${aliyunPayload?.data?.content || ''}</main></body></html>`;
+			}
+			if (page.contentType === 'joycode-changelog-json') {
+				let payload: { code?: number; data?: Array<{ semver?: string; publishedAt?: number; releaseNotes?: string }> };
+				try {
+					payload = JSON.parse(response.text) as { code?: number; data?: Array<{ semver?: string; publishedAt?: number; releaseNotes?: string }> };
+				} catch {
+					throw new Error('JoyCode 版本记录接口返回格式无效');
+				}
+				if (payload.code !== 0 || !Array.isArray(payload.data) || payload.data.length === 0) {
+					throw new Error('JoyCode 版本记录接口未返回正文');
+				}
+				const entries = [...payload.data]
+					.sort((left, right) => (right.publishedAt || 0) - (left.publishedAt || 0))
+					.map(entry => {
+						const date = entry.publishedAt ? new Date(entry.publishedAt).toISOString().slice(0, 10) : '';
+						return `<section><h2>v${entry.semver || '未知版本'}${date ? ` - ${date}` : ''}</h2>${entry.releaseNotes || ''}</section>`;
+					}).join('\n');
+				responseText = `<!doctype html><html lang="zh-CN"><head><title>JoyCode IDE 版本变更记录</title></head><body><main><h1>JoyCode IDE 版本变更记录</h1>${entries}</main></body></html>`;
+			}
 			const preparedSource = page.contentType === 'markdown'
 				? normalizeDocumentationMarkdown(response.text, sourceUrl)
-				: preserveDocumentationCardGrids(response.text, sourceUrl, options.documentParser);
+				: preserveDocumentationCardGrids(responseText, sourceUrl, options.documentParser);
 			const result = page.contentType === 'markdown'
 				? await clipMarkdown({
 					markdown: preparedSource,

@@ -23,17 +23,20 @@ By default Web Clipper attempts to intelligently extract only the main article c
 
 ## Capture an entire documentation site
 
-Web Clipper can collect a Sphinx documentation site (for example, a site built
-with `sphinx` or `sphinx-rtd-theme`) from any page under that site's versioned
-documentation root.
+Web Clipper can collect a documentation site from any page under that site's
+documentation root when it exposes a supported official index or documentation
+engine navigation. Supported sources include Sphinx, Docusaurus, VitePress,
+SiliconFlow-style Fumadocs pages, xKiro-style HTML sidebars,
+OpenClaw-style documentation pages, Google DevSite, `llms.txt` and
+sitemap-based documentation sites.
 
 ### Step-by-step
 
 1. Open the documentation site in the browser. You can start from the home page
    or from any chapter page.
 2. Open Web Clipper and wait for the page preview to finish. The extension
-   detects Sphinx pages by their documentation metadata; the action is not shown
-   on ordinary web pages.
+   detects supported documentation pages from their official index or engine
+   metadata; the action is not shown on ordinary web pages.
 3. Click the separate **收藏整个说明文档** button immediately above the purple
    **Add to Obsidian** button.
 5. Review the detected title, page count and save mode in the confirmation
@@ -42,8 +45,8 @@ documentation root.
 
 If the separate button is missing, refresh the documentation page and reopen the
 extension. The current page must be served over `http://` or `https://`, and its
-HTML must contain Sphinx metadata. Browser-internal pages, PDF viewers and
-ordinary sites are not supported by this action.
+HTML must expose a supported documentation index or engine marker. Browser-
+internal pages, PDF viewers and ordinary sites are not supported by this action.
 
 ### Where the notes go
 
@@ -59,6 +62,11 @@ The index mirrors the site's navigation whenever possible:
 - pages missing from the sidebar are placed under `Other pages`;
 - if the site has no readable sidebar, Sphinx `docname` paths are used as a
   fallback hierarchy.
+
+For VitePress sites, the page list comes from the official VitePress
+`__VP_SITE_DATA__` sidebar and its configured base path. This supports sites
+whose deployed links use `.html`, such as a documentation page under
+`/docs/getting-started.html`, without recursively following unrelated links.
 
 For example, a sidebar such as `Guide → Install → Advanced` becomes:
 
@@ -84,10 +92,11 @@ whole site in navigation order. Page titles become heading levels, and headings
 inside each page are shifted underneath the page title without duplicating the
 same title.
 
-The initial implementation is limited to Sphinx sites, 100 source pages, three
-concurrent page requests, and 20 MiB of Markdown for chapter-folder writes.
-Only pages on the same origin and beneath the detected documentation root are
-accepted. Images continue to use their original web URLs.
+The collection supports up to 5,000 source pages, three concurrent page
+requests, and 20 MiB of Markdown for chapter-folder writes. If the Companion
+is unavailable, a merged-note fallback is available for documents up to 100
+pages. Only pages on the same origin and beneath the detected documentation
+root are accepted. Images continue to use their original web URLs.
 
 ## Download images
 

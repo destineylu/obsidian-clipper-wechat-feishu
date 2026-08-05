@@ -32,6 +32,8 @@ import {
 import { countNoteContentMedia } from './content-status';
 import {
 	buildDocumentBundleOutput,
+	buildAliyunDocHelpManifest,
+	buildInteractiveSidebarManifest,
 	collectDocumentPages,
 	detectDocumentSourceKind,
 	discoverDocumentation,
@@ -1914,11 +1916,11 @@ function updateDocumentBundleProgress(options: {
 	count.textContent = options.total ? `${completed} / ${options.total}` : '';
 }
 
-async function fetchDocumentationText(url: string): Promise<FetchTextResult> {
+async function fetchDocumentationText(url: string, options: RequestInit = {}): Promise<FetchTextResult> {
 	const fetchOnce = () => browser.runtime.sendMessage({
 		action: 'fetchProxy',
 		url,
-		options: {},
+		options: { ...options, cache: 'no-store' },
 	}) as Promise<FetchTextResult>;
 	let response = await fetchOnce();
 	if (response.error === 'CORS_PERMISSION_NEEDED') {
@@ -1926,6 +1928,29 @@ async function fetchDocumentationText(url: string): Promise<FetchTextResult> {
 		if (granted) response = await fetchOnce();
 	}
 	return response;
+}
+
+async function fetchAliyunDocumentationMenu(): Promise<string> {
+	const url = 'https://bailian.console.aliyun.com/data/api.json?action=MenuPath&product=DocHelpService';
+	const fetchOnce = () => browser.runtime.sendMessage({
+		action: 'fetchProxy',
+		url,
+		options: {
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/x-www-form-urlencoded',
+			},
+			body: 'params=%7B%22NodeId%22%3A%222400256%22%2C%22Website%22%3A%22cn%22%2C%22Language%22%3A%22zh%22%7D&region=cn-hangzhou&sec_token=',
+		},
+	}) as Promise<FetchTextResult>;
+	let response = await fetchOnce();
+	if (response.error === 'CORS_PERMISSION_NEEDED') {
+		const granted = await browser.permissions.request({ origins: ['<all_urls>'] });
+		if (granted) response = await fetchOnce();
+	}
+	if (!response.ok) throw new Error(`无法读取阿里云百炼官方文档目录（${response.status || response.error || '网络错误'}）`);
+	return response.text;
 }
 
 async function findDocumentBundleClient(selectedVault: string): Promise<{
@@ -2001,17 +2026,36 @@ async function handleDocumentBundle(): Promise<void> {
 
 	try {
 		const prepared = await requirePreparedPageContext();
-		const manifest = await discoverDocumentation({
-			currentUrl: prepared.url,
-			currentHtml: currentDocumentHtml,
-			fetchText: fetchDocumentationText,
-			documentParser: {
-				parseFromString: (html, mimeType) => new DOMParser().parseFromString(
-					html,
-					mimeType as DOMParserSupportedType
-				),
-			},
-		});
+		const isAliyunBailian = new URL(prepared.url).hostname === 'bailian.console.aliyun.com';
+		const isSenseNova = new URL(prepared.url).hostname === 'platform.sensenova.cn';
+		const manifest = isAliyunBailian
+			? buildAliyunDocHelpManifest(prepared.url, await fetchAliyunDocumentationMenu())
+			: await discoverDocumentation({
+				currentUrl: prepared.url,
+				currentHtml: currentDocumentHtml,
+				fetchText: fetchDocumentationText,
+				documentParser: {
+					parseFromString: (html, mimeType) => new DOMParser().parseFromString(
+						html,
+						mimeType as DOMParserSupportedType
+					),
+				},
+			});
+		let pageSnapshots = new Map<string, string>();
+		if (!isAliyunBailian && !isSenseNova && (currentDocumentHtml.includes('menuItem') || currentDocumentHtml.includes('navList'))) {
+			const snapshotResponse = await browser.tabs.sendMessage(prepared.tabId, {
+				action: 'collectDocumentationSnapshots',
+				selector: '[class*="menuItem"]',
+			}).catch(() => null) as { snapshots?: { url: string; title: string; html: string }[]; error?: string } | null;
+			if (snapshotResponse?.error) {
+				throw new Error(`动态文档目录采集已停止：${snapshotResponse.error}`);
+			}
+			const snapshots = snapshotResponse?.snapshots || [];
+			if (snapshots.length > 1) {
+				pageSnapshots = new Map(snapshots.map(snapshot => [snapshot.url, snapshot.html]));
+				Object.assign(manifest, buildInteractiveSidebarManifest(prepared.url, currentDocumentHtml, snapshots));
+			}
+		}
 		const bundleClient = await findDocumentBundleClient(selectedVault);
 		if (manifest.pages.length > DOCUMENT_BUNDLE_MERGED_MAX_PAGES && !bundleClient?.resumable) {
 			throw new Error(getMessage('documentationCompanionRequired', String(manifest.pages.length)));
@@ -2069,6 +2113,9 @@ async function handleDocumentBundle(): Promise<void> {
 					propertyTypes,
 					documentParser,
 					fetchText: fetchDocumentationText,
+					currentPageUrl: prepared.url,
+					currentPageHtml: currentDocumentHtml,
+					pageSnapshots,
 					seenSourceUrls,
 					onProgress: (chunkCompleted, _total, page) => updateDocumentBundleProgress({
 						label: getMessage('documentationCollecting'),
@@ -2128,15 +2175,22 @@ async function handleDocumentBundle(): Promise<void> {
 		} else if (bundleClient) {
 			const pages = await collectDocumentPages({
 				manifest, template, propertyTypes, documentParser, fetchText: fetchDocumentationText,
+				currentPageUrl: prepared.url,
+				currentPageHtml: currentDocumentHtml,
+				pageSnapshots,
 			});
 			const output = buildDocumentBundleOutput({ manifest, pages, basePath, collectedAt: new Date() });
 			await bundleClient.client.writeDocumentBundle({
 				behavior: 'overwrite',
 				notes: output.notes,
 			});
+			savedNoteCount = output.notes.length;
 		} else {
 			const pages = await collectDocumentPages({
 				manifest, template, propertyTypes, documentParser, fetchText: fetchDocumentationText,
+				currentPageUrl: prepared.url,
+				currentPageHtml: currentDocumentHtml,
+				pageSnapshots,
 			});
 			const output = buildDocumentBundleOutput({ manifest, pages, basePath, collectedAt: new Date() });
 			await saveToObsidian(

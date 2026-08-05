@@ -72,11 +72,11 @@
 
 ### 收藏整个说明文档
 
-扩展支持把当前语言下的整套说明文档一次保存到 Obsidian。发现层按格式工作：支持标准 `llms.txt`（包括 Mintlify 等平台）、sitemap、Sphinx、Docusaurus 和 Google DevSite，因此可覆盖 Kimi、智谱、DeepSeek、Claude、Gemini 等大模型文档，而不是按域名逐个编写下载器。页面清单必须来自站点官方索引，不会无边界递归抓取普通网页链接。
+扩展支持把当前语言下的整套说明文档一次保存到 Obsidian。发现层按格式工作：支持标准 `llms.txt`（包括 Mintlify 等平台）、sitemap、Sphinx、Docusaurus、VitePress、Google DevSite 以及受支持文档引擎的官方 HTML 侧边栏，因此可覆盖 SiliconFlow、xKiro、OpenClaw、Kimi、智谱、DeepSeek、Claude、Gemini 等文档，而不是按域名逐个编写下载器。页面清单必须来自站点官方索引或文档引擎生成的官方侧边栏，不会无边界递归抓取普通网页链接。
 
 1. 安装并启用桌面端 `Clipper Attachment Bridge` 配套插件（不会出现在社区插件商店）。
 2. 在 Web Clipper **设置 → General → 飞书 / Lark** 中填写配套插件地址（通常为 `http://127.0.0.1:27125`）和配对令牌，点击“测试连接”，并确认扩展选择的 Vault 就是 Obsidian 当前打开的 Vault。
-3. 打开支持的文档页面，例如 Sphinx 文档或提供 `llms.txt` / sitemap 的主流大模型文档站。
+3. 打开支持的文档页面，例如 Sphinx、VitePress、SiliconFlow、xKiro、OpenClaw 文档，或提供 `llms.txt` / sitemap 的主流大模型文档站。
 4. 打开 Web Clipper，等待页面提取完成，点击紫色 **Add to Obsidian** 按钮上方单独的 **收藏整个说明文档** 按钮。
 5. 确认标题、当前语言、页面数量和保存方式。扩展会读取官方索引，抓取章节并写入选定的 Vault 和文件夹。
 
@@ -84,7 +84,7 @@
 
 文档不超过 100 页时，如果 Companion 不可用、未配对、连接到其他 Vault 或版本过旧，确认框会显示“合并为一篇 Markdown”模式。超过 100 页必须连接支持可恢复文档集合的新版 Companion，并按文件夹和多篇笔记保存。
 
-如果看不到“收藏整个说明文档”按钮，请刷新当前文档页面并重新打开扩展；PDF、浏览器内部页面和没有受支持官方索引的普通网页不支持此功能。
+如果看不到“收藏整个说明文档”按钮，请刷新当前文档页面并重新打开扩展；PDF、浏览器内部页面和没有受支持官方索引或文档引擎侧边栏的普通网页不支持此功能。
 
 ### 微信公众号文章提取增强
 

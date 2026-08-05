@@ -214,6 +214,67 @@ declare global {
 			return true;
 		}
 
+		if (request.action === "collectDocumentationSnapshots") {
+			(async () => {
+				const hasTrafficChallenge = () => /unusual traffic|异常流量|please slide to verify|请滑动验证/i.test(document.body.innerText || '');
+				if (hasTrafficChallenge()) throw new Error('页面出现异常流量验证');
+				const selector = request.selector || '[class*="menuItem"]';
+				const initialUrl = location.href;
+				const entries = Array.from(document.querySelectorAll(selector))
+					.map(element => ({
+						key: element.getAttribute('data-autolog') || '',
+						text: (element.textContent || '').replace(/\s+/g, ' ').trim(),
+					}))
+					.filter(entry => entry.text);
+				const initialEntry = entries.find(entry => Array.from(document.querySelectorAll(selector)).some(element =>
+					(element.getAttribute('data-autolog') || '') === entry.key && /selected|active/i.test(element.className?.toString() || '')
+				));
+				if (entries.length < 2) {
+					sendResponse({ snapshots: [] });
+					return;
+				}
+				const cleanSnapshot = (): string => {
+					const clone = document.documentElement.cloneNode(true) as HTMLElement;
+					clone.querySelectorAll('script, style, noscript').forEach(element => element.remove());
+					clone.querySelectorAll('*').forEach(element => element.removeAttribute('style'));
+					clone.querySelectorAll('[href], [src]').forEach(element => {
+						for (const attribute of ['href', 'src']) {
+							const value = element.getAttribute(attribute);
+							if (!value || value.startsWith('http') || value.startsWith('data:') || value.startsWith('#') || value.startsWith('//')) continue;
+							try { element.setAttribute(attribute, new URL(value, document.baseURI).toString()); } catch { /* keep the original value */ }
+						}
+					});
+					return clone.outerHTML;
+				};
+				const snapshots: { url: string; title: string; html: string }[] = [];
+				for (const entry of entries) {
+					const item = Array.from(document.querySelectorAll(selector)).find(element =>
+						(entry.key && element.getAttribute('data-autolog') === entry.key) ||
+						(!entry.key && (element.textContent || '').replace(/\s+/g, ' ').trim() === entry.text)
+					);
+					if (!(item instanceof HTMLElement)) continue;
+					item.click();
+					await new Promise(resolve => setTimeout(resolve, 700));
+					if (hasTrafficChallenge()) throw new Error('页面出现异常流量验证');
+					snapshots.push({ url: location.href, title: entry.text, html: cleanSnapshot() });
+				}
+				if (initialEntry) {
+					const restore = Array.from(document.querySelectorAll(selector)).find(element =>
+						element.getAttribute('data-autolog') === initialEntry.key
+					);
+					if (restore instanceof HTMLElement) {
+						restore.click();
+						await new Promise(resolve => setTimeout(resolve, 700));
+					}
+				} else if (location.href !== initialUrl) {
+					history.pushState({}, '', initialUrl);
+					window.dispatchEvent(new PopStateEvent('popstate'));
+				}
+				sendResponse({ snapshots });
+			})().catch(error => sendResponse({ snapshots: [], error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
+
 		if (request.action === "getPageContent") {
 			// Flatten shadow DOM before extraction (async, needs main world)
 			const flattenTimeout = new Promise<void>(resolve => setTimeout(resolve, 3000));

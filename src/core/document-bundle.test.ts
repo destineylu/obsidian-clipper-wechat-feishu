@@ -3,10 +3,14 @@ import { parseHTML } from 'linkedom';
 
 import {
 	buildDocumentBundleOutput,
+	buildAliyunDocHelpManifest,
 	buildClaudeSitemapManifest,
 	buildDocusaurusManifest,
+	buildInteractiveSidebarManifest,
 	buildGenericLlmsTxtManifest,
 	buildGoogleDevsiteManifest,
+	buildHtmlSidebarManifest,
+	buildVitePressManifest,
 	buildLlmsTxtManifest,
 	buildSphinxManifest,
 	collectDocumentPages,
@@ -44,6 +48,237 @@ describe('documentation source detection', () => {
 			'https://platform.kimi.com/docs/overview',
 			'<html lang="zh"><a href="/docs/llms.txt">Documentation Index</a></html>'
 		)).toBe('llms-txt-generic');
+		expect(detectDocumentSourceKind(
+			'https://www.openai-hk.com/docs/getting-started.html',
+			'<script>window.__VP_SITE_DATA__=JSON.parse("{}")</script><div class="VPNavBar"></div>'
+		)).toBe('vitepress');
+		expect(detectDocumentSourceKind(
+			'https://api-docs.siliconflow.cn/docs/userguide/introduction',
+			'<aside id="nd-sidebar"><a href="/docs/userguide/introduction">Intro</a></aside>'
+		)).toBe('sidebar-html');
+		expect(detectDocumentSourceKind(
+			'https://docs.xkiro.com/',
+			'<aside class="thin-scroll"><a href="/guides/quickstart/">Quick start</a></aside>'
+		)).toBe('sidebar-html');
+		expect(detectDocumentSourceKind(
+			'https://docs.openclaw.ai/zh-CN',
+			'<body class="oc-app-surface"><aside class="sidebar"><a href="/zh-CN/install">安装</a></aside></body>'
+		)).toBe('sidebar-html');
+		expect(detectDocumentSourceKind(
+			'https://developers.openai.com/api/docs',
+			'<nav><a href="/api/docs/quickstart">Quickstart</a></nav>'
+		)).toBe('sidebar-html');
+		expect(detectDocumentSourceKind(
+			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api',
+			'<div class="navList__abc"><div class="menuItem__abc">获取 API Key</div></div>'
+		)).toBe('sidebar-html');
+	});
+});
+
+describe('Alibaba Bailian official documentation API', () => {
+	const menuSource = JSON.stringify({
+		code: '200',
+		data: {
+			Data: JSON.stringify({
+				title: '大模型服务平台百炼',
+				children: [
+					{ title: '用户指南（模型）', url: '/zh/model-studio/model-user-guide/', children: [] },
+					{ title: '用户指南（应用）', url: '/zh/model-studio/application-user-guide/', children: [] },
+					{
+						title: 'API参考（模型）', url: '/zh/model-studio/model-api-reference/', children: [
+							{ title: '使用 API', children: [
+								{ title: '获取 API Key', url: '/zh/model-studio/get-api-key', alias: '/model-studio/get-api-key', validDocument: true },
+								{ title: '目录节点', alias: '/model-studio/group', validDocument: false },
+							] },
+						],
+					},
+					{ title: 'API参考（应用）', url: '/zh/model-studio/application-api-reference/', children: [] },
+				],
+			}),
+		},
+	});
+
+	test('selects the current API/model subtree and builds official content endpoints', () => {
+		const manifest = buildAliyunDocHelpManifest(
+			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model&url=2712195',
+			menuSource
+		);
+		expect(manifest).toMatchObject({ kind: 'aliyun-dochelp', title: 'API参考（模型）', locale: 'zh-cn' });
+		expect(manifest.pages).toHaveLength(1);
+		expect(manifest.pages[0]).toMatchObject({
+			docname: 'model-studio/get-api-key',
+			url: 'https://help.aliyun.com/zh/model-studio/get-api-key',
+			contentType: 'aliyun-json',
+		});
+		expect(manifest.pages[0].fetchUrl).toContain('document_detail.json?alias=%2Fmodel-studio%2Fget-api-key');
+	});
+
+	test('collects HTML from the official document detail JSON response', async () => {
+		const manifest = buildAliyunDocHelpManifest(
+			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model',
+			menuSource
+		);
+		const pages = await collectDocumentPages({
+			manifest,
+			template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async url => ({
+				ok: true, status: 200, finalUrl: url,
+				text: JSON.stringify({ data: { title: '获取 API Key', content: '<article><h1>获取 API Key</h1><p>创建并保存密钥。</p></article>' } }),
+			}),
+		});
+		expect(pages).toHaveLength(1);
+		expect(pages[0].url).toBe('https://help.aliyun.com/zh/model-studio/get-api-key');
+		expect(pages[0].body).toContain('创建并保存密钥。');
+	});
+
+	test('retries a transient successful response with empty document content', async () => {
+		const manifest = buildAliyunDocHelpManifest(
+			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model',
+			menuSource
+		);
+		let requests = 0;
+		const requestedUrls: string[] = [];
+		const pages = await collectDocumentPages({
+			manifest,
+			template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async url => {
+				requests += 1;
+				requestedUrls.push(url);
+				return {
+					ok: true, status: 200, finalUrl: url,
+					text: JSON.stringify({ data: requests === 1
+						? { title: '获取 API Key', content: '' }
+						: { title: '获取 API Key', content: '<h1>获取 API Key</h1><p>重试后取得正文。</p>' } }),
+				};
+			},
+		});
+		expect(requests).toBe(2);
+		expect(requestedUrls[1]).toContain('_clipper_retry=');
+		expect(requestedUrls[1]).not.toBe(requestedUrls[0]);
+		expect(pages[0].body).toContain('重试后取得正文。');
+	});
+});
+
+describe('VitePress documentation discovery', () => {
+	test('uses the current locale sidebar and resolves the VitePress base path', () => {
+		const html = `<html lang="zh-CN"><head><title>快速接入 | OpenAi-HK</title></head>
+			<script>window.__VP_SITE_DATA__=JSON.parse("{\\"base\\":\\"/docs/\\",\\"themeConfig\\":{\\"sidebar\\":[{\\"text\\":\\"OpenAI ChatGPT\\",\\"items\\":[{\\"text\\":\\"快速接入\\",\\"link\\":\\"/getting-started\\"},{\\"text\\":\\"服务定价\\",\\"link\\":\\"/price\\"},{\\"text\\":\\"外部页面\\",\\"link\\":\\"https://example.com/nope\\"}]}]}}")</script>`;
+		const manifest = buildVitePressManifest(
+			'https://www.openai-hk.com/docs/getting-started.html',
+			html
+		);
+
+		expect(manifest).toMatchObject({ kind: 'vitepress', locale: 'zh-cn', rootUrl: 'https://www.openai-hk.com/docs/' });
+		expect(manifest.pages.map(page => page.url)).toEqual([
+			'https://www.openai-hk.com/docs/getting-started.html',
+			'https://www.openai-hk.com/docs/price.html',
+		]);
+		expect(manifest.navigation?.[0]).toMatchObject({
+			title: 'OpenAI ChatGPT',
+			children: [{ docname: 'getting-started', title: '快速接入' }, { docname: 'price', title: '服务定价' }],
+		});
+	});
+
+	test('discovers VitePress through the shared adapter', async () => {
+		const html = '<html lang="zh-CN"><script>window.__VP_SITE_DATA__=JSON.parse("{\\"base\\":\\"/docs/\\",\\"themeConfig\\":{\\"sidebar\\":[{\\"text\\":\\"Docs\\",\\"items\\":[{\\"text\\":\\"Start\\",\\"link\\":\\"/start\\"}]}]}}")</script></html>';
+		const manifest = await discoverDocumentation({
+			currentUrl: 'https://docs.example.com/docs/start.html',
+			currentHtml: html,
+			fetchText: async () => ({ ok: false, status: 404, text: '' }),
+		});
+		expect(manifest.kind).toBe('vitepress');
+		expect(manifest.pages[0].url).toBe('https://docs.example.com/docs/start.html');
+	});
+
+	test('falls back to the cleaned VitePress sidebar after scripts are removed', async () => {
+		const html = `<html lang="zh-CN"><head><title>快速接入 | OpenAi-HK</title></head><body>
+			<header class="VPNavBar"></header><aside class="VPSidebar"><nav>
+				<ul><li><a href="https://www.openai-hk.com/docs/getting-started.html">✅ 快速接入</a></li>
+				<li><a href="https://www.openai-hk.com/docs/price.html">😊 服务定价</a></li></ul>
+			</nav></aside></body></html>`;
+		const manifest = await discoverDocumentation({
+			currentUrl: 'https://www.openai-hk.com/docs/getting-started.html',
+			currentHtml: html,
+			fetchText: async () => ({ ok: false, status: 404, text: '' }),
+			documentParser: { parseFromString: source => parseHTML(source).document },
+		});
+		expect(manifest).toMatchObject({ kind: 'vitepress', rootUrl: 'https://www.openai-hk.com/docs/' });
+		expect(manifest.pages.map(page => page.docname)).toEqual(['getting-started', 'price']);
+		expect(manifest.navigation?.[0]).toMatchObject({ title: '✅ 快速接入', docname: 'getting-started' });
+	});
+});
+
+describe('official HTML sidebar discovery', () => {
+	test('collects same-origin pages from supported documentation sidebars', () => {
+		const manifest = buildHtmlSidebarManifest(
+			'https://api-docs.siliconflow.cn/docs/userguide/introduction',
+			`<html lang="zh-CN"><head><title>平台简介</title></head><body>
+				<aside id="nd-sidebar"><nav><a href="/docs/userguide/introduction">平台简介</a>
+				<a href="/docs/userguide/quickstart">快速上手</a>
+				<a href="/docs/api-reference/models">模型列表</a>
+				<a href="/docs/api/batches-%7Bbatch_id%7D-get">获取批处理</a>
+				<a href="/docs/api/batches-%7Bbatch_id%7D-cancel-post">取消批处理</a>
+				<a href="https://example.com/outside">外部页面</a></nav></aside>
+			</body></html>`,
+			{ parseFromString: source => parseHTML(source).document }
+		);
+		expect(manifest).toMatchObject({ kind: 'sidebar-html', locale: 'zh-cn', rootUrl: 'https://api-docs.siliconflow.cn/docs/' });
+		expect(manifest.pages.map(page => page.url)).toEqual([
+			'https://api-docs.siliconflow.cn/docs/userguide/introduction',
+			'https://api-docs.siliconflow.cn/docs/userguide/quickstart',
+			'https://api-docs.siliconflow.cn/docs/api-reference/models',
+			'https://api-docs.siliconflow.cn/docs/api/batches-%7Bbatch_id%7D-get',
+			'https://api-docs.siliconflow.cn/docs/api/batches-%7Bbatch_id%7D-cancel-post',
+		]);
+		expect(manifest.pages.slice(-2).map(page => page.docname)).toEqual([
+			'api/batches-batch_id-get',
+			'api/batches-batch_id-cancel-post',
+		]);
+	});
+
+	test('keeps OpenClaw locale root and trailing-slash URLs', () => {
+		const manifest = buildHtmlSidebarManifest(
+			'https://docs.openclaw.ai/zh-CN',
+			`<html lang="zh-CN"><body class="oc-app-surface"><aside class="sidebar"><nav>
+				<a href="/zh-CN/start/showcase">展示案例</a><a href="/zh-CN/install">安装</a>
+			</nav></aside></body></html>`,
+			{ parseFromString: source => parseHTML(source).document }
+		);
+		expect(manifest.rootUrl).toBe('https://docs.openclaw.ai/zh-CN/');
+		expect(manifest.pages.map(page => page.docname)).toEqual(['start/showcase', 'install']);
+	});
+
+	test('keeps a client-rendered single-page documentation shell when its menu has no URLs', () => {
+		const manifest = buildHtmlSidebarManifest(
+			'https://platform.sensenova.cn/docs',
+			'<html><head><title>SenseNova 文档</title></head><body><aside><button>概览</button><button>快速开始</button></aside><main><h1>SenseNova AI API 文档</h1></main></body></html>',
+			{ parseFromString: source => parseHTML(source).document },
+		);
+		expect(manifest.pages).toHaveLength(1);
+		expect(manifest.pages[0]).toMatchObject({ docname: 'index', contentType: 'html' });
+	});
+
+	test('uses the official sitemap for a locale-root documentation site', async () => {
+		const sitemap = `<urlset>
+			<url><loc>https://docs.openclaw.ai/</loc></url>
+			<url><loc>https://docs.openclaw.ai/start/getting-started</loc></url>
+			<url><loc>https://docs.openclaw.ai/zh-CN</loc></url>
+			<url><loc>https://docs.openclaw.ai/zh-CN/start/getting-started</loc></url>
+			<url><loc>https://docs.openclaw.ai/zh-CN/gateway/configuration</loc></url>
+			<url><loc>https://docs.openclaw.ai/ja-JP/start/getting-started</loc></url>
+		</urlset>`;
+		const manifest = await discoverDocumentation({
+			currentUrl: 'https://docs.openclaw.ai/zh-CN/start/getting-started',
+			currentHtml: '<html lang="zh-CN"><head><title>OpenClaw Docs</title></head><body><aside class="sidebar"><a href="/zh-CN/start/getting-started">开始</a></aside></body></html>',
+			fetchText: async url => ({ ok: url.endsWith('/sitemap.xml'), status: 200, text: sitemap }),
+			documentParser: { parseFromString: source => parseHTML(source).document },
+		});
+		expect(manifest).toMatchObject({ kind: 'sitemap', locale: 'zh-CN', rootUrl: 'https://docs.openclaw.ai/zh-CN/' });
+		expect(manifest.pages.map(page => page.docname)).toEqual([
+			'index', 'gateway/configuration', 'start/getting-started',
+		]);
 	});
 });
 
@@ -115,6 +350,56 @@ describe('Docusaurus sitemap discovery', () => {
 			'https://api-docs.deepseek.com/zh-cn/guides/tool_calls',
 		]);
 	});
+
+	test('limits a Docusaurus sitemap to the current docs root', () => {
+		const manifest = buildDocusaurusManifest(
+			'https://joycode.jd.com/docs/start/product-overview/',
+			'<html lang="en"><head><title>产品概览 | JoyCode</title><meta name="generator" content="Docusaurus v3.0.0"></head></html>',
+			[
+				'https://joycode.jd.com/',
+				'https://joycode.jd.com/docs/start/product-overview',
+				'https://joycode.jd.com/docs/start/getting-started',
+				'https://joycode.jd.com/docs/changelog',
+				'https://joycode.jd.com/docs/tags',
+				'https://joycode.jd.com/accountCenter/account',
+			]
+		);
+		expect(manifest.rootUrl).toBe('https://joycode.jd.com/docs/');
+		expect(manifest.pages.map(page => page.url)).toEqual([
+			'https://joycode.jd.com/docs/changelog',
+			'https://joycode.jd.com/docs/start/getting-started',
+			'https://joycode.jd.com/docs/start/product-overview',
+		]);
+		expect(manifest.pages[0]).toMatchObject({
+			contentType: 'joycode-changelog-json',
+			fetchUrl: 'https://joycode.jd.com/api/saas/ideVersion/v1/ideVersionList',
+			fetchOptions: { method: 'POST' },
+		});
+	});
+
+	test('converts the official JoyCode changelog response into document content', async () => {
+		const manifest = buildDocusaurusManifest(
+			'https://joycode.jd.com/docs/start/product-overview/',
+			'<html lang="en"><head><title>产品概览 | JoyCode</title><meta name="generator" content="Docusaurus"></head></html>',
+			['https://joycode.jd.com/docs/changelog']
+		);
+		let requestOptions: RequestInit | undefined;
+		const pages = await collectDocumentPages({
+			manifest,
+			template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async (url, options) => {
+				requestOptions = options;
+				return {
+					ok: true, status: 200, finalUrl: url,
+					text: JSON.stringify({ code: 0, data: [{ semver: '3.0.9', publishedAt: 1785168000000, releaseNotes: '<p>提升系统稳定性。</p>' }] }),
+				};
+			},
+		});
+		expect(requestOptions).toMatchObject({ method: 'POST', body: '{"pluginId":"joycoder-ide","plat":"IDE"}' });
+		expect(pages[0].body).toContain('v3.0.9');
+		expect(pages[0].body).toContain('提升系统稳定性。');
+	});
 });
 
 describe('generic llms.txt discovery', () => {
@@ -134,6 +419,63 @@ describe('generic llms.txt discovery', () => {
 		expect(buildGenericLlmsTxtManifest(
 			'https://platform.kimi.com/docs/overview', html, parseLlmsTxt(llms)
 		).title).toBe('Kimi API 开放平台');
+	});
+
+	test('recursively expands same-origin llms.txt indexes and keeps HTML pages', async () => {
+		const root = `# OpenAI Developers
+- [Codex index](https://developers.openai.com/codex/llms.txt)
+- [Quickstart](https://developers.openai.com/api/docs/quickstart.md)`;
+		const codex = `# Codex
+- [Configuration](https://developers.openai.com/codex/config.md)
+- [Showcase](https://developers.openai.com/codex/showcase)`;
+		const manifest = await discoverDocumentation({
+			currentUrl: 'https://developers.openai.com/api/docs',
+			currentHtml: '<html lang="en"><a href="/llms.txt">Documentation index</a></html>',
+			fetchText: async url => ({
+				ok: true, status: 200, text: url.includes('/codex/llms.txt') ? codex : root,
+			}),
+		});
+		expect(manifest.pages.map(page => [page.docname, page.contentType])).toEqual([
+			['api/docs/quickstart', 'markdown'],
+			['codex/config', 'markdown'],
+			['codex/showcase', 'html'],
+		]);
+	});
+
+	test('uses the site root when llms.txt spans multiple documentation roots', () => {
+		const manifest = buildGenericLlmsTxtManifest(
+			'https://developers.openai.com/api/docs',
+			'<html lang="en"></html>',
+			parseLlmsTxt(`# OpenAI Developers
+- [API](https://developers.openai.com/api/docs/quickstart.md)
+- [Codex](https://developers.openai.com/codex/cli-customization.md)`)
+		);
+		expect(manifest.rootUrl).toBe('https://developers.openai.com/');
+		expect(manifest.pages.map(page => page.fetchUrl)).toEqual([
+			'https://developers.openai.com/api/docs/quickstart.md',
+			'https://developers.openai.com/codex/cli-customization.md',
+		]);
+	});
+
+	test('allows same-origin Markdown pages from mixed official documentation roots', async () => {
+		await expect(collectDocumentPages({
+			manifest: {
+				kind: 'llms-txt-generic', title: 'OpenAI Developers', rootUrl: 'https://developers.openai.com/api/', locale: 'en',
+				pages: [{
+					docname: 'codex/cli-customization',
+					title: 'Codex CLI customization',
+					url: 'https://developers.openai.com/codex/cli-customization',
+					fetchUrl: 'https://developers.openai.com/codex/cli-customization.md',
+					contentType: 'markdown',
+				}],
+			},
+			template: {
+				id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}',
+				path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [],
+			},
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async () => ({ ok: true, status: 200, finalUrl: 'https://developers.openai.com/codex/cli-customization', text: '# Codex CLI customization\n\nUse the CLI.' }),
+		})).resolves.toHaveLength(1);
 	});
 
 	test('covers locale-specific and locale-neutral sections from one llms.txt index', () => {
@@ -595,6 +937,43 @@ describe('collectDocumentPages', () => {
 				text: '<html><head><title>Gemini API</title></head><body><main><h1>Gemini API</h1></main></body></html>',
 			}),
 		})).resolves.toHaveLength(1);
+	});
+
+	test('allows the official OpenAI documentation mirror redirect', async () => {
+		await expect(collectDocumentPages({
+			manifest: {
+				kind: 'sidebar-html', title: 'OpenAI Developers', rootUrl: 'https://developers.openai.com/api/docs/', locale: 'en',
+				pages: [{ docname: 'codex/config-file/config-reference', title: 'Config reference', url: 'https://developers.openai.com/codex/config-file/config-reference.md', contentType: 'markdown' }],
+			},
+			template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async () => ({ ok: true, status: 200, finalUrl: 'https://learn.chatgpt.com/docs/config-file/config-reference.md', text: '# Config reference\n\nUse the configuration file.' }),
+		})).resolves.toHaveLength(1);
+	});
+
+	test('allows JoyCode to normalize HTTPS pages to HTTP on the same host', async () => {
+		await expect(collectDocumentPages({
+			manifest: {
+				kind: 'docusaurus', title: 'JoyCode', rootUrl: 'https://joycode.jd.com/docs/', locale: 'en',
+				pages: [{ docname: 'case/case1', title: '案例', url: 'https://joycode.jd.com/docs/case/case1', contentType: 'html' }],
+			},
+			template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async () => ({ ok: true, status: 200, finalUrl: 'http://joycode.jd.com/docs/case/case1/', text: '<html><head><title>案例</title></head><body><h1>案例</h1></body></html>' }),
+		})).resolves.toHaveLength(1);
+	});
+
+	test('builds chapter pages from an interactive documentation menu', () => {
+		const manifest = buildInteractiveSidebarManifest(
+			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api',
+			'<html><head><title>百炼 API 参考</title></head></html>',
+			[
+				{ url: 'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model&url=2712195', title: '获取 API Key', html: '<html></html>' },
+				{ url: 'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model&url=2712193', title: '安装 SDK', html: '<html></html>' },
+			]
+		);
+		expect(manifest.pages).toHaveLength(2);
+		expect(manifest.pages[0].title).toBe('获取 API Key');
 	});
 });
 
