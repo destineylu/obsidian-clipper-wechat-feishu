@@ -21,6 +21,53 @@ interface StoredCollection extends DocumentCollectionCreateRequest {
 	completedAt?: string;
 }
 
+function normalizeCollectionFolderPath(rawPath: string): string {
+	const path = rawPath.replace(/\\/g, '/').trim().replace(/\/+$/, '');
+	const segments = path.split('/');
+	if (
+		!path ||
+		path.startsWith('/') ||
+		/^[a-zA-Z]:/.test(path) ||
+		segments.some(segment => !segment || segment === '.' || segment === '..') ||
+		/[\u0000-\u001f|#\[\]]/.test(path)
+	) {
+		throw new BridgeProtocolError('invalid_document_collection_folder', 400, '文档集合目录无效');
+	}
+	return path;
+}
+
+function parentPath(path: string): string | null {
+	const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+	const separator = normalized.lastIndexOf('/');
+	return separator > 0 ? normalized.slice(0, separator) : null;
+}
+
+function storedCollectionFolder(collection: StoredCollection): string | null {
+	if (collection.folderPath) return normalizeCollectionFolderPath(collection.folderPath);
+	const indexFolder = collection.pages.__index__ ? parentPath(collection.pages.__index__.path) : null;
+	if (indexFolder) return indexFolder;
+	const pageParents = Object.values(collection.pages)
+		.map(page => parentPath(page.path))
+		.filter((path): path is string => Boolean(path));
+	if (pageParents.length === 0) return null;
+	const common = pageParents[0].split('/');
+	for (const path of pageParents.slice(1)) {
+		const segments = path.split('/');
+		while (common.length > 0 && common.some((segment, index) => segments[index] !== segment)) {
+			common.pop();
+		}
+	}
+	return common.length > 0 ? common.join('/') : null;
+}
+
+function migratedPath(path: string, fromFolder: string, toFolder: string): string {
+	const normalized = path.replace(/\\/g, '/');
+	if (normalized === fromFolder) return toFolder;
+	return normalized.startsWith(`${fromFolder}/`)
+		? `${toFolder}${normalized.slice(fromFolder.length)}`
+		: normalized;
+}
+
 export class DocumentCollectionStore {
 	private readonly collections = new Map<string, StoredCollection>();
 
@@ -40,21 +87,85 @@ export class DocumentCollectionStore {
 			if (existing.rootUrl !== request.rootUrl || existing.locale !== request.locale) {
 				throw new BridgeProtocolError('collection_identity_conflict', 409, '文档集合标识与现有集合不一致');
 			}
-			for (const [pageId, page] of Object.entries(existing.pages)) {
-				if (await this.writer.documentNoteExists(page.path)) continue;
-				delete existing.pages[pageId];
+			const pageEntries = Object.entries(existing.pages);
+			for (let offset = 0; offset < pageEntries.length; offset += 100) {
+				const chunk = pageEntries.slice(offset, offset + 100);
+				const existence = await Promise.all(
+					chunk.map(async ([pageId, page]) => ({
+						pageId,
+						exists: await this.writer.documentNoteExists(page.path),
+					}))
+				);
+				for (const result of existence) {
+					if (!result.exists) delete existing.pages[result.pageId];
+				}
 			}
-			const resumed = !existing.completedAt && Object.keys(existing.pages).length > 0;
-			existing.title = request.title;
-			existing.totalPages = request.totalPages;
-			delete existing.completedAt;
-			await this.persist(existing);
-			return this.status(existing, resumed, resumed);
+			const originalFolderPath = existing.folderPath;
+			const originalPaths = Object.fromEntries(
+				Object.entries(existing.pages).map(([pageId, page]) => [pageId, page.path])
+			);
+			const currentFolder = storedCollectionFolder(existing);
+			const targetFolder = request.folderPath
+				? normalizeCollectionFolderPath(request.folderPath)
+				: currentFolder;
+			let migrated = false;
+			try {
+				if (
+					currentFolder &&
+					targetFolder &&
+					currentFolder.toLowerCase() !== targetFolder.toLowerCase() &&
+					Object.keys(existing.pages).length > 0
+				) {
+					await this.writer.renameDocumentCollectionFolder(
+						currentFolder,
+						targetFolder,
+						Object.values(existing.pages).map(page => page.path)
+					);
+					for (const page of Object.values(existing.pages)) {
+						page.path = migratedPath(page.path, currentFolder, targetFolder);
+					}
+					migrated = true;
+				}
+				const layoutChanged = request.pathLayoutVersion !== undefined &&
+					existing.pathLayoutVersion !== request.pathLayoutVersion;
+				const resumed = !layoutChanged && !existing.completedAt && Object.keys(existing.pages).length > 0;
+				existing.title = request.title;
+				existing.totalPages = request.totalPages;
+				if (targetFolder) existing.folderPath = targetFolder;
+				if (request.pathLayoutVersion !== undefined) {
+					existing.pathLayoutVersion = request.pathLayoutVersion;
+				}
+				delete existing.completedAt;
+				await this.persist(existing);
+				return this.status(existing, resumed, resumed);
+			} catch (error) {
+				if (migrated && currentFolder && targetFolder) {
+					await this.writer.renameDocumentCollectionFolder(
+						targetFolder,
+						currentFolder,
+						Object.values(existing.pages).map(page => page.path),
+						true
+					).catch(() => undefined);
+					for (const [pageId, path] of Object.entries(originalPaths)) {
+						if (existing.pages[pageId]) existing.pages[pageId].path = path;
+					}
+				}
+				if (originalFolderPath) existing.folderPath = originalFolderPath;
+				else delete existing.folderPath;
+				throw error;
+			}
 		}
 		const collection: StoredCollection = { ...request, pages: {} };
 		this.collections.set(request.collectionId, collection);
 		await this.persist(collection);
 		return this.status(collection, false);
+	}
+
+	async getStatus(collectionId: string): Promise<DocumentCollectionStatusResponse> {
+		const collection = await this.load(collectionId);
+		if (!collection) throw new BridgeProtocolError('collection_not_found', 404, '文档集合不存在');
+		const resumed = !collection.completedAt && Object.keys(collection.pages).length > 0;
+		return this.status(collection, resumed);
 	}
 
 	async complete(
@@ -89,9 +200,10 @@ export class DocumentCollectionStore {
 	async writeBatch(collectionId: string, request: DocumentCollectionBatchRequest): Promise<DocumentCollectionStatusResponse> {
 		const collection = await this.load(collectionId);
 		if (!collection) throw new BridgeProtocolError('collection_not_found', 404, '文档集合不存在');
-		const changed = request.notes.filter(note =>
-			collection.pages[note.pageId]?.contentHash !== note.contentHash
-		);
+		const changed = request.notes.filter(note => {
+			const stored = collection.pages[note.pageId];
+			return stored?.contentHash !== note.contentHash || stored?.path !== note.path;
+		});
 		if (changed.length > 0) {
 			const result = await this.writer.commitDocumentCollectionBatch(changed.map(note => ({
 				...note,
@@ -116,6 +228,13 @@ export class DocumentCollectionStore {
 		}
 		if (!request.title.trim() || request.title.length > 500 || !request.locale.trim() || request.locale.length > 32) {
 			throw new BridgeProtocolError('invalid_collection_metadata', 400, '文档集合信息无效');
+		}
+		if (request.folderPath !== undefined) normalizeCollectionFolderPath(request.folderPath);
+		if (
+			request.pathLayoutVersion !== undefined &&
+			(!Number.isInteger(request.pathLayoutVersion) || request.pathLayoutVersion < 1)
+		) {
+			throw new BridgeProtocolError('invalid_path_layout_version', 400, '文档集合路径版本无效');
 		}
 		try {
 			const url = new URL(request.rootUrl);

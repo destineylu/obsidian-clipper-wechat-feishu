@@ -213,10 +213,12 @@ describe('FeishuBridgeClient', () => {
 		await client.writeDocumentCollectionBatch('llms-txt-12345678', {
 			notes: [{ pageId: 'intro', path: 'Docs/Intro.md', content: '# Intro', contentHash: '12345678' }],
 		});
+		await client.getDocumentCollectionStatus('llms-txt-12345678');
 		await client.completeDocumentCollection('llms-txt-12345678', { expectedPageIds: ['intro'] });
 		expect(fetchImpl.mock.calls.map(call => String(call[0]))).toEqual([
 			'http://127.0.0.1:27124/v1/document-collections',
 			'http://127.0.0.1:27124/v1/document-collections/llms-txt-12345678/batches',
+			'http://127.0.0.1:27124/v1/document-collections/llms-txt-12345678',
 			'http://127.0.0.1:27124/v1/document-collections/llms-txt-12345678/complete',
 		]);
 	});

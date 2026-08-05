@@ -214,6 +214,159 @@ declare global {
 			return true;
 		}
 
+		if (request.action === "getExpandedDocumentationSidebar") {
+			(async () => {
+				const sidebar = document.querySelector(
+					'.theme-doc-sidebar-container, aside[class*="docSidebar"], nav[aria-label*="文档侧边栏"]'
+				);
+				if (!sidebar) {
+					sendResponse({ html: '' });
+					return;
+				}
+				const expanded: HTMLElement[] = [];
+				for (let round = 0; round < 8; round += 1) {
+					const collapsed = Array.from(sidebar.querySelectorAll(
+						'a.menu__link--sublist[aria-expanded="false"][href="#"]'
+					)).filter((element): element is HTMLElement => element instanceof HTMLElement);
+					if (collapsed.length === 0) break;
+					for (const element of collapsed) {
+						element.click();
+						expanded.push(element);
+						await new Promise(resolve => setTimeout(resolve, 40));
+					}
+					await new Promise(resolve => setTimeout(resolve, 120));
+				}
+				const clone = document.documentElement.cloneNode(true) as HTMLElement;
+				clone.querySelectorAll('script, style, noscript').forEach(element => element.remove());
+				const html = clone.outerHTML;
+				for (const element of [...expanded].reverse()) {
+					if (element.getAttribute('aria-expanded') === 'true') element.click();
+				}
+				sendResponse({ html });
+			})().catch(error => sendResponse({
+				html: '',
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			return true;
+		}
+
+		if (request.action === "collectSenseNovaDocumentationSections") {
+			try {
+				if (location.hostname !== 'platform.sensenova.cn') {
+					sendResponse({ snapshots: [] });
+					return;
+				}
+				const article = document.querySelector('main article.docs-article, main article');
+				if (!article) {
+					sendResponse({ snapshots: [], error: '未找到 SenseNova 文档正文' });
+					return;
+				}
+				const children = Array.from(article.children);
+				const starts = children.flatMap((element, index) => {
+					if (!element.matches('section[id]')) return [];
+					const heading = element.querySelector(':scope > h1, :scope > h2');
+					return heading ? [{ element, index, heading }] : [];
+				});
+				const sidebarEntries = Array.from(document.querySelectorAll('aside nav > div')).flatMap(group => {
+					const groupTitle = (group.querySelector(':scope > p')?.textContent || '')
+						.replace(/\s+/g, ' ')
+						.trim();
+					return Array.from(group.querySelectorAll('button[data-slot="button"]')).flatMap(button => {
+						const title = (button.textContent || '').replace(/\s+/g, ' ').trim();
+						return title ? [{ title, group: groupTitle }] : [];
+					});
+				});
+				const snapshots = starts.map((start, index) => {
+					const title = (start.heading.textContent || '').replace(/\s+/g, ' ').trim() || `Section ${index + 1}`;
+					const nextIndex = starts[index + 1]?.index ?? children.length;
+					const snapshotDocument = document.implementation.createHTMLDocument(title);
+					snapshotDocument.documentElement.lang = document.documentElement.lang || 'zh-CN';
+					const base = snapshotDocument.createElement('base');
+					base.href = document.baseURI;
+					snapshotDocument.head.prepend(base);
+					const main = snapshotDocument.createElement('main');
+					const snapshotArticle = snapshotDocument.createElement('article');
+					for (const element of children.slice(start.index, nextIndex)) {
+						snapshotArticle.appendChild(element.cloneNode(true));
+					}
+					main.appendChild(snapshotArticle);
+					snapshotDocument.body.appendChild(main);
+					snapshotDocument.querySelectorAll('script, style, noscript').forEach(element => element.remove());
+					snapshotDocument.querySelectorAll('[href], [src]').forEach(element => {
+						for (const attribute of ['href', 'src']) {
+							const value = element.getAttribute(attribute);
+							if (!value || value.startsWith('data:') || value.startsWith('javascript:')) continue;
+							try {
+								element.setAttribute(attribute, new URL(value, document.baseURI).toString());
+							} catch {
+								// Preserve the original value when it is not a valid URL.
+							}
+						}
+					});
+					const url = new URL(location.href);
+					url.hash = start.element.id;
+					return {
+						url: url.toString(),
+						title,
+						html: `<!doctype html>${snapshotDocument.documentElement.outerHTML}`,
+						...(sidebarEntries[index]?.group ? { group: sidebarEntries[index].group } : {}),
+					};
+				});
+				sendResponse({ snapshots });
+			} catch (error) {
+				sendResponse({
+					snapshots: [],
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return;
+		}
+
+		if (request.action === "collectDocsifySnapshots") {
+			(async () => {
+				const initialUrl = location.href;
+				const links = Array.from(document.querySelectorAll('.sidebar-nav a[href], .docsify-sidebar a[href]'))
+					.map(anchor => ({
+						href: anchor.getAttribute('href') || '',
+						title: (anchor.textContent || '').replace(/\s+/g, ' ').trim(),
+					}))
+					.filter(entry => entry.title && entry.href.startsWith('#/'));
+				const seen = new Set<string>();
+				const entries = links.filter(entry => {
+					const route = entry.href.split(/[?]/, 1)[0];
+					if (seen.has(route)) return false;
+					seen.add(route);
+					return true;
+				});
+				const cleanSnapshot = (): string => {
+					const clone = document.documentElement.cloneNode(true) as HTMLElement;
+					clone.querySelectorAll('script, style, noscript').forEach(element => element.remove());
+					clone.querySelectorAll('*').forEach(element => element.removeAttribute('style'));
+					clone.querySelectorAll('[href], [src]').forEach(element => {
+						for (const attribute of ['href', 'src']) {
+							const value = element.getAttribute(attribute);
+							if (!value || value.startsWith('http') || value.startsWith('data:') || value.startsWith('#') || value.startsWith('//')) continue;
+							try { element.setAttribute(attribute, new URL(value, document.baseURI).toString()); } catch { /* keep original */ }
+						}
+					});
+					return clone.outerHTML;
+				};
+				const snapshots: { url: string; title: string; html: string }[] = [];
+				for (const entry of entries) {
+					location.hash = entry.href.slice(1);
+					await new Promise(resolve => setTimeout(resolve, 450));
+					snapshots.push({ url: location.href, title: entry.title, html: cleanSnapshot() });
+				}
+				if (location.href !== initialUrl) {
+					history.replaceState({}, '', initialUrl);
+					window.dispatchEvent(new HashChangeEvent('hashchange'));
+					await new Promise(resolve => setTimeout(resolve, 250));
+				}
+				sendResponse({ snapshots });
+			})().catch(error => sendResponse({ snapshots: [], error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
+
 		if (request.action === "collectDocumentationSnapshots") {
 			(async () => {
 				const hasTrafficChallenge = () => /unusual traffic|异常流量|please slide to verify|请滑动验证/i.test(document.body.innerText || '');

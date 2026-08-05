@@ -54,6 +54,12 @@ export interface BridgeTransactionWriter {
 
 export interface DocumentBundleWriter {
 	documentNoteExists(path: string): Promise<boolean>;
+	renameDocumentCollectionFolder(
+		fromPath: string,
+		toPath: string,
+		ownedNotePaths: string[],
+		allowExistingTarget?: boolean
+	): Promise<void>;
 	commitDocumentBundle(
 		request: DocumentBundleWriteRequest
 	): Promise<DocumentBundleWriteResponse>;

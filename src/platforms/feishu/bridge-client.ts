@@ -43,6 +43,8 @@ type StreamingRequestInit = RequestInit & {
 	duplex?: 'half';
 };
 
+const DOCUMENT_COLLECTION_REQUEST_TIMEOUT_MS = 5 * 60_000;
+
 export class FeishuBridgeRequestError extends Error {
 	constructor(
 		public readonly code: string,
@@ -234,7 +236,18 @@ export class FeishuBridgeClient {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(request),
 			signal,
-		});
+		}, DOCUMENT_COLLECTION_REQUEST_TIMEOUT_MS);
+	}
+
+	getDocumentCollectionStatus(
+		collectionId: string,
+		signal?: AbortSignal
+	): Promise<DocumentCollectionStatusResponse> {
+		return this.requestJson(
+			`/v1/document-collections/${encodeURIComponent(collectionId)}`,
+			{ method: 'GET', signal },
+			15_000
+		);
 	}
 
 	writeDocumentCollectionBatch(
@@ -249,7 +262,8 @@ export class FeishuBridgeClient {
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(request),
 				signal,
-			}
+			},
+			DOCUMENT_COLLECTION_REQUEST_TIMEOUT_MS
 		);
 	}
 
@@ -265,7 +279,8 @@ export class FeishuBridgeClient {
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(request),
 				signal,
-			}
+			},
+			DOCUMENT_COLLECTION_REQUEST_TIMEOUT_MS
 		);
 	}
 

@@ -24,6 +24,17 @@ function openObsidianUrl(url: string): void {
 	});
 }
 
+export function buildObsidianOpenUrl(filePath: string, vault: string): string {
+	const normalizedPath = filePath.replace(/\\/g, '/');
+	let url = `obsidian://open?file=${encodeURIComponent(normalizedPath)}`;
+	if (vault) url += `&vault=${encodeURIComponent(vault)}`;
+	return url;
+}
+
+export function openObsidianNote(filePath: string, vault: string): void {
+	openObsidianUrl(buildObsidianOpenUrl(filePath, vault));
+}
+
 async function tryClipboardWrite(fileContent: string, obsidianUrl: string): Promise<void> {
 	const success = await copyToClipboard(fileContent);
 	

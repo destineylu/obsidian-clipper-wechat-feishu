@@ -16,6 +16,8 @@ export const DOCUMENT_BUNDLE_MAX_NOTES = DOCUMENT_BUNDLE_MAX_PAGES + 1;
 export const DOCUMENT_BUNDLE_MAX_BYTES = 20 * 1024 * 1024;
 export const DOCUMENT_COLLECTION_BATCH_MAX_NOTES = 50;
 export const DOCUMENT_COLLECTION_BATCH_MAX_BYTES = 10 * 1024 * 1024;
+export const DOCUMENT_COLLECTION_NOTE_MAX_BYTES = 64 * 1024 * 1024;
+export const DOCUMENT_COLLECTION_PATH_LAYOUT_VERSION = 2;
 
 export type FeishuBridgeSupportedBehavior = Extract<
 	Template['behavior'],
@@ -56,6 +58,8 @@ export interface DocumentCollectionCreateRequest {
 	rootUrl: string;
 	locale: string;
 	totalPages: number;
+	folderPath?: string;
+	pathLayoutVersion?: number;
 }
 
 export interface DocumentCollectionNoteRequest extends DocumentBundleNoteRequest {
@@ -69,6 +73,47 @@ export interface DocumentCollectionBatchRequest {
 
 export interface DocumentCollectionCompleteRequest {
 	expectedPageIds: string[];
+}
+
+export function createDocumentCollectionBatches(
+	notes: DocumentCollectionNoteRequest[]
+): DocumentCollectionNoteRequest[][] {
+	const batches: DocumentCollectionNoteRequest[][] = [];
+	let batch: DocumentCollectionNoteRequest[] = [];
+	let batchBytes = 0;
+	const encoder = new TextEncoder();
+
+	const flushBatch = (): void => {
+		if (!batch.length) return;
+		batches.push(batch);
+		batch = [];
+		batchBytes = 0;
+	};
+
+	for (const note of notes) {
+		const noteBytes = encoder.encode(note.content).byteLength;
+		if (noteBytes > DOCUMENT_COLLECTION_NOTE_MAX_BYTES) {
+			throw new Error('单篇 Markdown 超过配套插件允许的 64 MiB 上限');
+		}
+
+		if (noteBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) {
+			flushBatch();
+			batches.push([note]);
+			continue;
+		}
+
+		if (
+			batch.length >= DOCUMENT_COLLECTION_BATCH_MAX_NOTES ||
+			batchBytes + noteBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES
+		) {
+			flushBatch();
+		}
+		batch.push(note);
+		batchBytes += noteBytes;
+	}
+
+	flushBatch();
+	return batches;
 }
 
 export interface DocumentCollectionStatusResponse {

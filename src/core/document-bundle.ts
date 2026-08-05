@@ -29,18 +29,21 @@ export interface DocumentPageManifest {
 	fetchUrl?: string;
 	fetchOptions?: RequestInit;
 	contentType?: DocumentContentType;
+	aliyunNodeId?: string;
 }
 
 export interface InteractiveDocumentationSnapshot {
 	url: string;
 	title: string;
 	html: string;
+	group?: string;
 }
 
 interface AliyunDocHelpNode {
 	title?: string;
 	url?: string;
 	alias?: string;
+	id?: number | string;
 	validDocument?: boolean;
 	children?: AliyunDocHelpNode[];
 }
@@ -140,7 +143,18 @@ export function detectDocumentSourceKind(
 		/<aside[^>]*>[\s\S]*?<button\b/i.test(html) ||
 		/(?:id|class)=["'][^"']*(?:sidebar|sider|navigation)[^"']*["'][^>]*>[\s\S]*?<a\b[^>]+href=/i.test(html) ||
 		/role=["'](?:navigation|tree)["'][^>]*>[\s\S]*?<a\b[^>]+href=/i.test(html) ||
-		/class=["'][^"']*navList[^"']*["'][^>]*>[\s\S]*?class=["'][^"']*menuItem[^"']*["']/i.test(html)
+		/class=["'][^"']*navList[^"']*["'][^>]*>[\s\S]*?class=["'][^"']*menuItem[^"']*["']/i.test(html) ||
+		/class=["'][^"']*\bmd-sidebar\b[^"']*["']/i.test(html) ||
+		/class=["'][^"']*\bmd-nav\b[^"']*["']/i.test(html) ||
+		/data-testid=["'](?:page.desktopTableOfContents|sidebar|toc)["']/i.test(html) ||
+		/data-component-part=["']sidebar["']/i.test(html) ||
+		/class=["'][^"']*\bnextra-sidebar(?:-container)?\b[^"']*["']/i.test(html) ||
+		/class=["'][^"']*\bside-sheet\b[^"']*\btable-of-contents\b[^"']*["']/i.test(html) ||
+		/class=["'][^"']*\bgitbook-root\b[^"']*["']/i.test(html) ||
+		/id=["']gitbook-root["']/i.test(html) ||
+		/class=["'][^"']*\bwy-nav-side\b[^"']*["']/i.test(html) ||
+		/class=["'][^"']*\bbook-summary\b[^"']*["']/i.test(html) ||
+		/window\.[\$]?docsify\s*=|window\.\$docsify\s*=/i.test(html)
 	) {
 		return 'sidebar-html';
 	}
@@ -179,9 +193,12 @@ export function buildInteractiveSidebarManifest(
 	snapshots: InteractiveDocumentationSnapshot[]
 ): DocumentManifest {
 	const current = new URL(currentUrl);
-	const root = new URL(current.pathname.endsWith('/') ? current.pathname : `${current.pathname}/`, current.origin);
+	const root = current.hostname === 'platform.sensenova.cn'
+		? new URL('/', current.origin)
+		: new URL(current.pathname.endsWith('/') ? current.pathname : `${current.pathname}/`, current.origin);
 	const title = plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation');
 	const pages: DocumentPageManifest[] = [];
+	const snapshotByDocname = new Map<string, InteractiveDocumentationSnapshot>();
 	const seen = new Set<string>();
 	for (const [index, snapshot] of snapshots.entries()) {
 		let url: URL;
@@ -200,14 +217,34 @@ export function buildInteractiveSidebarManifest(
 			fetchUrl: url.toString(),
 			contentType: 'html',
 		});
+		snapshotByDocname.set(docname, snapshot);
 	}
 	if (pages.length === 0) throw new Error('No interactive documentation pages were captured');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
 	const locale = vitePressLocale(currentUrl, currentHtml);
+	const navigation: DocumentNavigationNode[] = [];
+	const groups = new Map<string, DocumentNavigationNode>();
+	for (const page of pages) {
+		const snapshot = snapshotByDocname.get(page.docname);
+		const groupTitle = plainTitle(snapshot?.group || '', '');
+		const node = { docname: page.docname, title: page.title, children: [] };
+		if (!groupTitle) {
+			navigation.push(node);
+			continue;
+		}
+		let group = groups.get(groupTitle);
+		if (!group) {
+			group = { title: groupTitle, children: [] };
+			groups.set(groupTitle, group);
+			navigation.push(group);
+		}
+		group.children.push(node);
+	}
 	return {
 		kind: 'sidebar-html', title, rootUrl: root.toString(), locale,
 		collectionId: stableCollectionId('sidebar-html', root.toString(), locale),
 		pages,
+		navigation,
 	};
 }
 
@@ -231,11 +268,26 @@ function aliyunMenuSelection(currentUrl: string): number {
 	return type === 'app' ? 3 : 2;
 }
 
+function aliyunDocumentAlias(node: AliyunDocHelpNode): string {
+	const fallbackAlias = typeof node.alias === 'string'
+		? node.alias.replace(/^\/+|\/+$/g, '')
+		: '';
+	if (!node.url) return fallbackAlias;
+	try {
+		const pathname = new URL(node.url, 'https://help.aliyun.com').pathname
+			.replace(/^\/(?:zh|en)(?=\/)/i, '')
+			.replace(/^\/+|\/+$/g, '');
+		return pathname || fallbackAlias;
+	} catch {
+		return fallbackAlias;
+	}
+}
+
 function aliyunNodeNavigation(node: AliyunDocHelpNode, pages: DocumentPageManifest[]): DocumentNavigationNode | null {
 	const children = (node.children || [])
 		.map(child => aliyunNodeNavigation(child, pages))
 		.filter((child): child is DocumentNavigationNode => Boolean(child));
-	const alias = typeof node.alias === 'string' ? node.alias.replace(/^\/+|\/+$/g, '') : '';
+	const alias = aliyunDocumentAlias(node);
 	const page = node.validDocument && alias
 		? pages.find(candidate => candidate.docname === alias)
 		: undefined;
@@ -250,16 +302,17 @@ export function buildAliyunDocHelpManifest(currentUrl: string, source: string): 
 	const pages: DocumentPageManifest[] = [];
 	const seen = new Set<string>();
 	const visit = (node: AliyunDocHelpNode) => {
-		const alias = typeof node.alias === 'string' ? node.alias.replace(/^\/+|\/+$/g, '') : '';
+		const alias = aliyunDocumentAlias(node);
 		if (node.validDocument && alias && !seen.has(alias)) {
 			seen.add(alias);
-			const canonicalPath = node.url?.startsWith('/') ? node.url : `/zh/${alias}`;
+			const canonicalPath = node.url || `/zh/${alias}`;
 			pages.push({
 				docname: alias,
 				title: plainTitle(node.title || decodedPathTitle(alias, alias), decodedPathTitle(alias, alias)),
 				url: new URL(canonicalPath, 'https://help.aliyun.com').toString(),
 				fetchUrl: `https://help.aliyun.com/help/json/document_detail.json?alias=${encodeURIComponent(`/${alias}`)}&pageNum=1&pageSize=20&website=cn&language=zh&channel=`,
 				contentType: 'aliyun-json',
+				...(node.id !== undefined ? { aliyunNodeId: String(node.id) } : {}),
 			});
 		}
 		for (const child of node.children || []) visit(child);
@@ -269,9 +322,10 @@ export function buildAliyunDocHelpManifest(currentUrl: string, source: string): 
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
 	const rootUrl = new URL(selected.url || '/zh/model-studio/', 'https://help.aliyun.com').toString();
 	const navigation = aliyunNodeNavigation(selected, pages);
+	const selectedTitle = plainTitle(selected.title || root.title || '文档', '文档');
 	return {
 		kind: 'aliyun-dochelp',
-		title: plainTitle(selected.title || root.title || '阿里云百炼文档', '阿里云百炼文档'),
+		title: selectedTitle.includes('阿里云百炼') ? selectedTitle : `阿里云百炼 · ${selectedTitle}`,
 		rootUrl,
 		locale: 'zh-cn',
 		collectionId: stableCollectionId('aliyun-dochelp', rootUrl, 'zh-cn'),
@@ -287,6 +341,69 @@ function decodeXmlText(value: string): string {
 		.replace(/&gt;/gi, '>')
 		.replace(/&quot;/gi, '"')
 		.replace(/&#39;|&apos;/gi, "'");
+}
+
+function htmlMetadataContent(html: string, key: string): string {
+	const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const patterns = [
+		new RegExp(`<meta[^>]+(?:name|property)=["']${escapedKey}["'][^>]+content=["']([^"']+)["']`, 'i'),
+		new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["']${escapedKey}["']`, 'i'),
+	];
+	for (const pattern of patterns) {
+		const value = html.match(pattern)?.[1];
+		if (value) return plainTitle(decodeXmlText(value), '');
+	}
+	return '';
+}
+
+function normalizedLocaleLabel(locale: string): string {
+	const parts = locale.trim().replace(/_/g, '-').split('-').filter(Boolean);
+	if (parts.length === 0) return '';
+	return parts.map((part, index) => index === 0 ? part.toLowerCase() :
+		(part.length === 2 || /^\d{3}$/.test(part) ? part.toUpperCase() : part)
+	).join('-');
+}
+
+function localizedDocumentationTitle(title: string, locale: string): string {
+	const normalizedLocale = normalizedLocaleLabel(locale);
+	if (!normalizedLocale || normalizedLocale === 'en' || normalizedLocale === 'und') return title;
+	if (title.toLowerCase().endsWith(` - ${normalizedLocale.toLowerCase()}`)) return title;
+	return `${title} - ${normalizedLocale}`;
+}
+
+function documentationSiteTitle(currentUrl: string, currentHtml: string, fallback: string): string {
+	const fullTitle = plainTitle(
+		currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '',
+		''
+	);
+	const separatorParts = fullTitle.split(/\s*(?:\||–|—)\s*|\s+-\s+/).filter(Boolean);
+	const titleSuffix = separatorParts.length > 1
+		? separatorParts[separatorParts.length - 1] || ''
+		: '';
+	const metadataTitle = htmlMetadataContent(currentHtml, 'og:site_name') ||
+		htmlMetadataContent(currentHtml, 'application-name');
+	const navbarTitle = plainTitle(
+		currentHtml.match(/class=["'][^"']*(?:navbar__title|VPNavBarTitle|nav(?:bar)?-brand)[^"']*["'][^>]*>(?:<[^>]+>)*([^<]+)/i)?.[1] || '',
+		''
+	);
+	const siteLikeFullTitle = !titleSuffix &&
+		/(?:docs?|documentation|文档|开放平台|developers?|开发者|服务平台)$/i.test(fullTitle);
+	if (siteLikeFullTitle) return fullTitle;
+	if (metadataTitle && metadataTitle.length > 2) return metadataTitle;
+	if (titleSuffix && titleSuffix.length > 2) return titleSuffix;
+	if (navbarTitle && navbarTitle.length > 2) return navbarTitle;
+	try {
+		const hostname = new URL(currentUrl).hostname;
+		if (hostname === 'api-docs.siliconflow.cn') return 'SiliconFlow API Documentation';
+		if (hostname === 'docs.xkiro.com') return 'xKiro API Documentation';
+	} catch { /* use fallback */ }
+	return fullTitle || fallback;
+}
+
+function weakDocumentationTitle(title: string): boolean {
+	const normalized = title.trim().toLowerCase();
+	return normalized.length <= 4 ||
+		['documentation', 'docs', 'api docs', 'index', 'home'].includes(normalized);
 }
 
 function decodedPathTitle(path: string, fallback: string): string {
@@ -424,8 +541,11 @@ export function buildGenericLlmsTxtManifest(
 	}
 	if (pages.length === 0) throw new Error('llms.txt contains no pages under the current documentation root');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
+	const title = weakDocumentationTitle(index.title)
+		? documentationSiteTitle(currentUrl, currentHtml, index.title)
+		: index.title;
 	return {
-		kind: 'llms-txt-generic', title: index.title, rootUrl: root.toString(), locale,
+		kind: 'llms-txt-generic', title, rootUrl: root.toString(), locale,
 		collectionId: stableCollectionId('llms-txt-generic', root.toString(), locale),
 		pages, navigation: fallbackNavigation(pages),
 	};
@@ -471,7 +591,7 @@ export function buildLocaleSitemapManifest(
 	if (pages.length === 0) throw new Error('Sitemap contains no pages for the current locale');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
 	pages.sort((left, right) => left.docname === 'index' ? -1 : right.docname === 'index' ? 1 : left.docname.localeCompare(right.docname));
-	const title = plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation');
+	const title = documentationSiteTitle(currentUrl, currentHtml, 'Documentation');
 	return {
 		kind: 'sitemap', title, rootUrl: root.toString(), locale,
 		collectionId: stableCollectionId('sitemap', root.toString(), locale),
@@ -510,7 +630,7 @@ export function buildClaudeSitemapManifest(
 	if (pages.length === 0) throw new Error('Claude sitemap contains no pages for the current language');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
 	pages.sort((left, right) => left.docname === 'index' ? -1 : right.docname === 'index' ? 1 : left.docname.localeCompare(right.docname));
-	const localizedTitle = locale.toLowerCase() === 'en' ? title : `${title} - ${locale}`;
+	const localizedTitle = localizedDocumentationTitle(title, locale);
 	return {
 		kind: 'llms-txt', title: localizedTitle, rootUrl: root.toString(), locale,
 		collectionId: stableCollectionId('llms-txt', root.toString(), locale),
@@ -530,9 +650,8 @@ export function buildDocusaurusManifest(
 	const localePrefix = locale === 'en' ? '' : `/${pathLocale || locale}`;
 	const docsRootPath = current.pathname.match(/^(.*\/docs\/)/i)?.[1] || '';
 	const sourceRootPath = docsRootPath || `${localePrefix || ''}/`;
-	const titleFromHtml = currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation';
-	const baseTitle = plainTitle(titleFromHtml.replace(/\s*[|–—-]\s*[^|–—]+$/, ''), 'Documentation');
-	const title = locale === 'en' ? baseTitle : `${baseTitle} - ${locale}`;
+	const baseTitle = documentationSiteTitle(currentUrl, currentHtml, 'Documentation');
+	const title = localizedDocumentationTitle(baseTitle, locale);
 	const pages: DocumentPageManifest[] = [];
 	const seen = new Set<string>();
 	for (const rawLocation of locations) {
@@ -677,6 +796,22 @@ export function buildHtmlSidebarManifest(
 		'aside.thin-scroll',
 		'aside.sidebar',
 		'nav[aria-label="Sidebar Navigation"]',
+		'.md-sidebar--primary',
+		'.md-sidebar',
+		'nav.md-nav',
+		'.wy-nav-side',
+		'.wy-menu-vertical',
+		'.book-summary',
+		'aside.side-sheet[class*="table-of-contents"]',
+		'#gitbook-root aside',
+		'.gitbook-root aside',
+		'.nextra-sidebar',
+		'.nextra-sidebar-container',
+		'[data-component-part="sidebar"]',
+		'[data-testid="sidebar"]',
+		'[data-testid="page.desktopTableOfContents"]',
+		'.docsify-sidebar',
+		'.sidebar-nav',
 		'[role="navigation"]',
 		'[role="tree"]',
 		'[class*="sidebar"]',
@@ -697,12 +832,13 @@ export function buildHtmlSidebarManifest(
 	const menuItems = container.querySelectorAll('[class*="menuItem"], button').length;
 	if (links.length < 2 && menuItems >= 2) {
 		const pageUrl = new URL(currentUrl);
+		const locale = vitePressLocale(currentUrl, currentHtml);
 		return {
 			kind: 'sidebar-html',
-			title: plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation'),
+			title: documentationSiteTitle(currentUrl, currentHtml, 'Documentation'),
 			rootUrl: pageUrl.toString(),
-			locale: vitePressLocale(currentUrl, currentHtml),
-			collectionId: stableCollectionId('sidebar-html', pageUrl.toString(), vitePressLocale(currentUrl, currentHtml)),
+			locale,
+			collectionId: stableCollectionId('sidebar-html', pageUrl.toString(), locale),
 			pages: [{
 				docname: 'index',
 				title: plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation'),
@@ -714,7 +850,8 @@ export function buildHtmlSidebarManifest(
 	const urls = links.map(link => {
 		try { return new URL(link.href, currentUrl); } catch { return null; }
 	}).filter((url): url is URL => url !== null && url.origin === current.origin);
-	const rootPath = vitePressCommonBasePath(urls, currentUrl);
+	const isDocsify = urls.some(url => docsifyRoute(url) !== null) || /window\.[\$]?docsify\s*=|window\.\$docsify\s*=/i.test(currentHtml);
+	const rootPath = isDocsify ? '/' : vitePressCommonBasePath(urls, currentUrl);
 	const root = new URL(rootPath, current.origin);
 	const pages: DocumentPageManifest[] = [];
 	const seen = new Set<string>();
@@ -722,12 +859,14 @@ export function buildHtmlSidebarManifest(
 		let url: URL;
 		try { url = new URL(link.href, currentUrl); } catch { continue; }
 		url.search = '';
-		url.hash = '';
+		const docsifyDocname = isDocsify ? docsifyRoute(url) : null;
+		if (!docsifyDocname) url.hash = '';
 		if (url.origin !== root.origin || !url.pathname.startsWith(root.pathname)) continue;
-		const relative = url.pathname.slice(root.pathname.length).replace(/^\/+|\/+$/g, '') || 'index';
+		const relative = docsifyDocname || url.pathname.slice(root.pathname.length).replace(/^\/+|\/+$/g, '') || 'index';
 		const docname = normalizedSafeDocname(relative);
-		if (!docname || seen.has(url.toString())) continue;
-		seen.add(url.toString());
+		const identity = docsifyDocname ? `${url.origin}${url.pathname}#/${docsifyDocname}` : url.toString();
+		if (!docname || seen.has(identity)) continue;
+		seen.add(identity);
 		pages.push({
 			docname,
 			title: link.title || decodedPathTitle(docname, docname),
@@ -738,7 +877,7 @@ export function buildHtmlSidebarManifest(
 	if (pages.length === 0) throw new Error('Official documentation sidebar contains no same-origin pages');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
 	const locale = vitePressLocale(currentUrl, currentHtml);
-	const title = plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation');
+	const title = documentationSiteTitle(currentUrl, currentHtml, 'Documentation');
 	return {
 		kind: 'sidebar-html',
 		title,
@@ -747,6 +886,12 @@ export function buildHtmlSidebarManifest(
 		collectionId: stableCollectionId('sidebar-html', root.toString(), locale),
 		pages,
 	};
+}
+
+function docsifyRoute(url: URL): string | null {
+	if (!url.hash.startsWith('#/')) return null;
+	const route = url.hash.slice(2).split(/[?#]/, 1)[0].replace(/^\/+|\/+$/g, '');
+	return route || 'index';
 }
 
 function buildVitePressDomPages(
@@ -798,7 +943,10 @@ export function buildVitePressManifest(
 		if (fallback.pages.length === 0) throw new Error('VitePress sidebar contains no documentation pages');
 		return {
 			kind: 'vitepress',
-			title: plainTitle(currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation', 'Documentation'),
+			title: localizedDocumentationTitle(
+				documentationSiteTitle(currentUrl, currentHtml, 'Documentation'),
+				locale
+			),
 			rootUrl: fallback.rootUrl,
 			locale,
 			collectionId: stableCollectionId('vitepress', fallback.rootUrl, locale),
@@ -845,11 +993,13 @@ export function buildVitePressManifest(
 	const navigation = sidebar.map(item => item && typeof item === 'object' ? addItem(item) : null).filter(Boolean) as DocumentNavigationNode[];
 	if (pages.length === 0) throw new Error('VitePress sidebar contains no documentation pages');
 	if (pages.length > DOCUMENT_COLLECTION_MAX_PAGES) throw new Error(`Documentation contains more than ${DOCUMENT_COLLECTION_MAX_PAGES} pages`);
-	const titleFromHtml = currentHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || 'Documentation';
-	const title = plainTitle(titleFromHtml.replace(/\s*[|–—-]\s*[^|–—]+$/, ''), 'Documentation');
+	const title = localizedDocumentationTitle(
+		documentationSiteTitle(currentUrl, currentHtml, 'Documentation'),
+		locale
+	);
 	return {
 		kind: 'vitepress',
-		title: locale === 'en' ? title : `${title} - ${locale}`,
+		title,
 		rootUrl: base.toString(),
 		locale,
 		collectionId: stableCollectionId('vitepress', base.toString(), locale),
@@ -911,7 +1061,7 @@ export function buildGoogleDevsiteManifest(
 	});
 	return {
 		kind: 'google-devsite',
-		title: locale === 'en' ? 'Gemini API documentation' : `Gemini API documentation - ${locale}`,
+		title: localizedDocumentationTitle('Gemini API Documentation', locale),
 		rootUrl: root.toString(),
 		locale,
 		collectionId: stableCollectionId('google-devsite', root.toString(), locale),
@@ -1285,6 +1435,22 @@ const DOCUMENTATION_NAVIGATION_SELECTORS = [
 	'nav[aria-label="侧边菜单"]',
 	'nav[aria-label="Docs sidebar"]',
 	'.theme-doc-sidebar-container',
+	'.md-sidebar--primary',
+	'.md-sidebar',
+	'nav.md-nav',
+	'.wy-nav-side',
+	'.wy-menu-vertical',
+	'.book-summary',
+	'aside.side-sheet[class*="table-of-contents"]',
+	'#gitbook-root aside',
+	'.gitbook-root aside',
+	'.nextra-sidebar',
+	'.nextra-sidebar-container',
+	'[data-component-part="sidebar"]',
+	'[data-testid="sidebar"]',
+	'[data-testid="page.desktopTableOfContents"]',
+	'.docsify-sidebar',
+	'.sidebar-nav',
 	'[data-testid*="sidebar"]',
 	'aside nav',
 ];
@@ -1293,7 +1459,9 @@ function normalizedNavigationUrl(rawUrl: string, baseUrl: string): string | null
 	try {
 		const url = new URL(rawUrl, baseUrl);
 		url.search = '';
-		url.hash = '';
+		const route = docsifyRoute(url);
+		if (route) url.hash = `#/${route}`;
+		else url.hash = '';
 		url.pathname = url.pathname.replace(/\/+$/, '') || '/';
 		return url.toString();
 	} catch {
@@ -1353,7 +1521,24 @@ export function parseDocumentationNavigation(options: {
 				}
 				return nodes;
 			};
-			const tree = directLists(container).flatMap(parseList);
+			const listedTree = directLists(container).flatMap(parseList);
+			const flatSeen = new Set<string>();
+			const orderedPages = Array.from(container.querySelectorAll('a[href]')).flatMap(anchor => {
+				const key = normalizedNavigationUrl(anchor.getAttribute('href') || '', options.pageUrl);
+				if (!key) return [];
+				const target = new URL(key);
+				const page = target.origin === root.origin ? pageByUrl.get(key) : undefined;
+				if (!page || flatSeen.has(page.docname)) return [];
+				flatSeen.add(page.docname);
+				return [{
+					...page,
+					title: plainTitle(anchor.textContent || '', page.title),
+				}];
+			});
+			const flatTree = fallbackNavigation(orderedPages);
+			const tree = countNavigationPages(listedTree) >= countNavigationPages(flatTree)
+				? listedTree
+				: flatTree;
 			if (countNavigationPages(tree) > countNavigationPages(bestTree)) bestTree = tree;
 		}
 	}
@@ -1675,7 +1860,7 @@ export async function collectDocumentPages(options: {
 	const sourcePages = options.pages || options.manifest.pages;
 	const results = new Array<CollectedDocumentPage | undefined>(sourcePages.length);
 	const defaultConcurrency = options.manifest.kind === 'aliyun-dochelp'
-		? 2
+		? 1
 		: DOCUMENT_BUNDLE_FETCH_CONCURRENCY;
 	const concurrency = Math.max(
 		1,
@@ -1698,28 +1883,107 @@ export async function collectDocumentPages(options: {
 				: options.currentPageUrl === requestUrl && options.currentPageHtml
 				? { ok: true, status: 200, finalUrl: requestUrl, text: options.currentPageHtml }
 				: await options.fetchText(requestUrl, page.fetchOptions);
-			let aliyunPayload: { data?: { content?: string; title?: string } } | undefined;
+			let aliyunPayload: {
+				code?: number | string;
+				msg?: string;
+				message?: string;
+				success?: boolean;
+				data?: { content?: string; title?: string };
+			} | undefined;
+			let aliyunHtmlFallback = false;
+			const aliyunFailureDetails: string[] = [];
 			if (page.contentType === 'aliyun-json') {
-				const retryDelays = [300, 700, 1_500];
-				for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+				const parsePayload = (candidate: FetchTextResult): typeof aliyunPayload => {
+					if (!candidate.ok) return undefined;
 					try {
-						aliyunPayload = response.ok
-							? JSON.parse(response.text) as { data?: { content?: string; title?: string } }
-							: undefined;
+						return JSON.parse(candidate.text) as typeof aliyunPayload;
 					} catch {
-						aliyunPayload = undefined;
+						return undefined;
 					}
-					if (aliyunPayload?.data?.content) break;
-					if (attempt === retryDelays.length) {
-						if (!response.ok) {
-							throw new Error(`阿里云文档正文请求失败：${page.title}（${response.status || response.error || '网络错误'}）`);
-						}
-						throw new Error(`阿里云文档正文连续 ${retryDelays.length + 1} 次返回为空：${page.title}`);
-					}
-					await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+				};
+				const hasPayloadContent = (payload: typeof aliyunPayload): boolean =>
+					typeof payload?.data?.content === 'string' && Boolean(payload.data.content.trim());
+				const recordFailure = (
+					source: string,
+					candidate: FetchTextResult,
+					payload?: typeof aliyunPayload
+				): void => {
+					const detail = [
+						candidate.ok ? '' : `HTTP ${candidate.status || candidate.error || '网络错误'}`,
+						payload?.code !== undefined ? `code=${payload.code}` : '',
+						payload?.msg || payload?.message || '',
+						candidate.ok && !payload ? 'JSON 无效' : '',
+						candidate.ok && payload && !hasPayloadContent(payload) ? '正文为空' : '',
+					].filter(Boolean).join(', ');
+					aliyunFailureDetails.push(`${source}: ${detail || '未知错误'}`);
+				};
+
+				const aliasRetryDelays = [300, 700, 1_500];
+				for (let attempt = 0; attempt <= aliasRetryDelays.length; attempt += 1) {
+					aliyunPayload = parsePayload(response);
+					if (hasPayloadContent(aliyunPayload)) break;
+					recordFailure(`alias 第 ${attempt + 1} 次`, response, aliyunPayload);
+					if (attempt === aliasRetryDelays.length) break;
+					await new Promise(resolve => setTimeout(resolve, aliasRetryDelays[attempt]));
 					const retryUrl = new URL(requestUrl);
 					retryUrl.searchParams.set('_clipper_retry', `${Date.now()}-${pageIndex}-${attempt + 1}`);
-					response = await options.fetchText(retryUrl.toString());
+					response = await options.fetchText(retryUrl.toString(), page.fetchOptions);
+				}
+
+				if (!hasPayloadContent(aliyunPayload) && page.aliyunNodeId) {
+					const nodeIdRetryDelays = [500, 1_500];
+					const nodeIdUrl = new URL(requestUrl);
+					nodeIdUrl.searchParams.delete('alias');
+					nodeIdUrl.searchParams.delete('_clipper_retry');
+					nodeIdUrl.searchParams.set('nodeId', page.aliyunNodeId);
+					for (let attempt = 0; attempt <= nodeIdRetryDelays.length; attempt += 1) {
+						const candidateUrl = new URL(nodeIdUrl);
+						if (attempt > 0) {
+							candidateUrl.searchParams.set('_clipper_node_retry', `${Date.now()}-${pageIndex}-${attempt}`);
+						}
+						response = await options.fetchText(candidateUrl.toString(), page.fetchOptions);
+						aliyunPayload = parsePayload(response);
+						if (hasPayloadContent(aliyunPayload)) break;
+						recordFailure(`nodeId 第 ${attempt + 1} 次`, response, aliyunPayload);
+						if (attempt < nodeIdRetryDelays.length) {
+							await new Promise(resolve => setTimeout(resolve, nodeIdRetryDelays[attempt]));
+						}
+					}
+				}
+
+				if (!hasPayloadContent(aliyunPayload)) {
+					const publicPageRetryDelays = [1_000, 3_000];
+					for (let attempt = 0; attempt <= publicPageRetryDelays.length; attempt += 1) {
+						const fallbackUrl = new URL(page.url);
+						if (attempt > 0) {
+							fallbackUrl.searchParams.set('_clipper_fallback', `${Date.now()}-${pageIndex}-${attempt}`);
+						}
+						const fallbackResponse = await options.fetchText(fallbackUrl.toString(), page.fetchOptions);
+						const fallbackText = fallbackResponse.text || '';
+						const hasDocumentHtml = fallbackResponse.ok && (
+							fallbackText.includes('icms-help-docs-content') ||
+							fallbackText.includes('window.__ICE_PAGE_PROPS__') ||
+							(fallbackText.includes(page.title) && /<(?:main|article)\b/i.test(fallbackText))
+						);
+						if (hasDocumentHtml) {
+							response = fallbackResponse;
+							aliyunHtmlFallback = true;
+							break;
+						}
+						recordFailure(
+							`公开页面第 ${attempt + 1} 次`,
+							fallbackResponse
+						);
+						if (attempt < publicPageRetryDelays.length) {
+							await new Promise(resolve => setTimeout(resolve, publicPageRetryDelays[attempt]));
+						}
+					}
+				}
+
+				if (!hasPayloadContent(aliyunPayload) && !aliyunHtmlFallback) {
+					throw new Error(
+						`阿里云文档正文多路回退失败：${page.title}（${aliyunFailureDetails.join('；')}）`
+					);
 				}
 			}
 			if (!response.ok) {
@@ -1733,7 +1997,7 @@ export async function collectDocumentPages(options: {
 				? page.url
 				: finalUrl.toString();
 			let responseText = response.text;
-			if (page.contentType === 'aliyun-json') {
+			if (page.contentType === 'aliyun-json' && !aliyunHtmlFallback) {
 				const title = aliyunPayload?.data?.title || page.title;
 				responseText = `<!doctype html><html lang="zh-CN"><head><title>${title.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] || character)}</title></head><body><main>${aliyunPayload?.data?.content || ''}</main></body></html>`;
 			}
@@ -1774,7 +2038,9 @@ export async function collectDocumentPages(options: {
 					documentParser: options.documentParser,
 					propertyTypes: options.propertyTypes,
 				});
-			const sourceKey = normalizedSourceUrl(sourceUrl);
+			const sourceKey = snapshotHtml
+				? `${normalizedSourceUrl(sourceUrl)}#${page.docname}`
+				: normalizedSourceUrl(sourceUrl);
 			const isDuplicate = options.seenSourceUrls?.has(sourceKey) || false;
 			if (!isDuplicate) options.seenSourceUrls?.add(sourceKey);
 			const titleVariable = result.variables['{{title}}'];
@@ -1788,7 +2054,7 @@ export async function collectDocumentPages(options: {
 				url: sourceUrl,
 				noteName: pageTitle,
 				content: normalizeDocumentNoteContent(result.fullContent, pageTitle),
-				body: restoreDocumentationCardGrids(result.content),
+				body: normalizeDocumentationBody(restoreDocumentationCardGrids(result.content)),
 			};
 			completed += 1;
 			options.onProgress?.(completed, sourcePages.length, page);
@@ -1820,8 +2086,43 @@ function normalizedDocumentPageTitle(candidate: string, fallback: string): strin
 		: cleaned;
 }
 
+export function normalizeDocumentationBody(markdown: string): string {
+	const expanded: string[] = [];
+	for (const rawLine of markdown.replace(/\r\n?/g, '\n').split('\n')) {
+		const joinedFence = rawLine.match(/^(\s*)(`{3,}|~{3,})(\[[^\n]+)$/);
+		if (joinedFence) expanded.push(`${joinedFence[1]}${joinedFence[2]}`, '', joinedFence[3]);
+		else expanded.push(rawLine);
+	}
+
+	const normalized: string[] = [];
+	let fence: { marker: string; length: number } | null = null;
+	for (let line of expanded) {
+		const fenceMatch = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+		if (fenceMatch) {
+			const marker = fenceMatch[1][0];
+			if (!fence) fence = { marker, length: fenceMatch[1].length };
+			else if (
+				fence.marker === marker &&
+				fenceMatch[1].length >= fence.length &&
+				!fenceMatch[2].trim()
+			) fence = null;
+			normalized.push(line);
+			continue;
+		}
+		if (!fence) {
+			if (/^\s*(?:\*\*|__|\*|_)\s*$/.test(line)) continue;
+			line = line.replace(/^(\s*#{1,6}\s+)(.*)$/, (_match, prefix: string, heading: string) =>
+				`${prefix}${heading.replace(/\\([.!()[\]_-])/g, '$1')}`
+			);
+			line = line.replace(/^(\t+)(?=(?:[-+*]|\d+[.)])\s)/, tabs => '  '.repeat(tabs.length));
+		}
+		normalized.push(line);
+	}
+	return normalized.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function normalizeDocumentNoteContent(content: string, title: string): string {
-	let normalized = restoreDocumentationCardGrids(content).replace(/\r\n?/g, '\n');
+	let normalized = normalizeDocumentationBody(restoreDocumentationCardGrids(content));
 	if (!normalized.startsWith('---\n')) return normalized;
 	const end = normalized.indexOf('\n---\n', 4);
 	if (end < 0) return normalized;
@@ -1874,12 +2175,66 @@ function cardGridHtml(
 	return `${title}<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0;">${items}</div>`;
 }
 
+function removeDocumentationNavigationChrome(document: Document, pageUrl: string): void {
+	for (const element of Array.from(document.querySelectorAll(
+		'.pagination-nav, [class*="pagination-nav"], [data-docs-pagination], ' +
+		'.theme-doc-footer, .doc-footer, nav[aria-label*="pagination" i], nav[aria-label*="previous" i]'
+	))) element.remove();
+
+	let page: URL;
+	try { page = new URL(pageUrl); } catch { return; }
+	for (const article of Array.from(document.querySelectorAll('article'))) {
+		const children = Array.from(article.children);
+		for (const candidate of children.slice(-3)) {
+			if (!/(?:^|\s)grid-cols-2(?:\s|$)/.test(candidate.getAttribute('class') || '')) continue;
+			const anchors = Array.from(candidate.querySelectorAll('a[href]'));
+			if (anchors.length < 1 || anchors.length > 2) continue;
+			if (candidate.querySelector('h1, h2, h3, h4, h5, h6, pre, table, ul, ol, img, video')) continue;
+			const sameDocumentationLinks = anchors.every(anchor => {
+				try {
+					const url = new URL(anchor.getAttribute('href') || '', pageUrl);
+					return url.origin === page.origin && /\/docs(?:\/|$)/i.test(url.pathname);
+				} catch {
+					return false;
+				}
+			});
+			if (sameDocumentationLinks) candidate.remove();
+		}
+	}
+}
+
+function convertDocumentationCallouts(document: Document): void {
+	for (const note of Array.from(document.querySelectorAll('.note'))) {
+		if (note.closest('table')) continue;
+		const className = note.getAttribute('class') || '';
+		const type = /note-important|\bimportant\b/i.test(className) ? 'IMPORTANT'
+			: /note-warning|\bwarning\b/i.test(className) ? 'WARNING'
+				: /note-caution|\bcaution\b/i.test(className) ? 'CAUTION'
+					: /note-tip|\btip\b/i.test(className) ? 'TIP'
+						: 'NOTE';
+		const content = note.querySelector('.noteContentSpan') || note;
+		const titleElement = Array.from(content.querySelectorAll('strong')).find(candidate =>
+			candidate.closest('.note') === note
+		);
+		const title = plainTitle(titleElement?.textContent || '', '');
+		titleElement?.remove();
+		const blockquote = document.createElement('blockquote');
+		const heading = document.createElement('p');
+		heading.textContent = `[!${type}]${title ? ` ${title}` : ''}`;
+		blockquote.appendChild(heading);
+		while (content.firstChild) blockquote.appendChild(content.firstChild);
+		note.replaceWith(blockquote);
+	}
+}
+
 export function preserveDocumentationCardGrids(
 	html: string,
 	pageUrl: string,
 	documentParser: DocumentParser
 ): string {
 	const document = documentParser.parseFromString(html, 'text/html') as Document;
+	removeDocumentationNavigationChrome(document, pageUrl);
+	convertDocumentationCallouts(document);
 	const containers = Array.from(document.querySelectorAll(
 		'.gemini-api-recommended, .gemini-api-explore, [class*="card-grid"], [data-card-grid]'
 	));
@@ -2008,17 +2363,31 @@ function flattenNavigation(
 	return records;
 }
 
+function navigationOrderPrefixes(
+	nodes: DocumentNavigationNode[],
+	prefixes = new WeakMap<DocumentNavigationNode, string>()
+): WeakMap<DocumentNavigationNode, string> {
+	const width = Math.max(2, String(nodes.length).length);
+	for (let index = 0; index < nodes.length; index += 1) {
+		const node = nodes[index];
+		prefixes.set(node, String(index + 1).padStart(width, '0'));
+		navigationOrderPrefixes(node.children || [], prefixes);
+	}
+	return prefixes;
+}
+
 function noteDirectory(
 	folderPath: string,
 	ancestors: DocumentNavigationNode[],
-	manifestTitle: string
+	manifestTitle: string,
+	orderPrefixes: WeakMap<DocumentNavigationNode, string>
 ): string {
 	const segments = ancestors
 		.filter((node, index) => {
 			if (node.docname === 'index' && index === 0) return false;
 			return !(index === 0 && !node.docname && node.title === manifestTitle);
 		})
-		.map(node => safePathSegment(node.title, 'section'));
+		.map(node => `${orderPrefixes.get(node) || '00'} - ${safePathSegment(node.title, 'section')}`);
 	return [folderPath, ...segments].filter(Boolean).join('/');
 }
 
@@ -2086,6 +2455,12 @@ export function normalizeMergedPageBody(
 	return lines.join('\n').trim();
 }
 
+export function documentCollectionFolderPath(title: string, basePath: string): string {
+	const safeTitle = safePathSegment(title, 'Documentation');
+	const normalizedBasePath = normalizeBasePath(basePath);
+	return [normalizedBasePath, safeTitle].filter(Boolean).join('/');
+}
+
 export function buildDocumentBundleOutput(options: {
 	manifest: DocumentManifest;
 	pages: CollectedDocumentPage[];
@@ -2098,11 +2473,11 @@ export function buildDocumentBundleOutput(options: {
 		throw new Error('Collected page does not belong to the documentation manifest');
 	}
 	const title = safePathSegment(options.manifest.title, 'Documentation');
-	const basePath = normalizeBasePath(options.basePath);
-	const folderPath = [basePath, title].filter(Boolean).join('/');
+	const folderPath = documentCollectionFolderPath(options.manifest.title, options.basePath);
 	const usedPaths = new Set<string>();
 	const notes: DocumentBundleNote[] = [];
 	const navigation = completeNavigation(options.manifest);
+	const orderPrefixes = navigationOrderPrefixes(navigation);
 	const pageByDocname = new Map(options.pages.map(page => [page.docname, page]));
 	const navigationRecords = flattenNavigation(navigation, pageByDocname);
 	const pathByDocname = new Map<string, string>();
@@ -2125,8 +2500,16 @@ export function buildDocumentBundleOutput(options: {
 
 	for (const record of navigationRecords) {
 		const { page } = record;
-		const directory = noteDirectory(folderPath, record.ancestors, options.manifest.title);
-		const baseName = safePathSegment(page.noteName || page.title, 'Untitled');
+		const directory = noteDirectory(
+			folderPath,
+			record.ancestors,
+			options.manifest.title,
+			orderPrefixes
+		);
+		const baseName = `${orderPrefixes.get(record.node) || '00'} - ${safePathSegment(
+			page.noteName || page.title,
+			'Untitled'
+		)}`;
 		let path = options.pathOverrides?.[page.docname] || `${directory}/${baseName}.md`;
 		if (!options.pathOverrides?.[page.docname] && usedPaths.has(path.toLowerCase())) {
 			const leaf = safePathSegment(page.docname.split('/').pop() || '', 'page');

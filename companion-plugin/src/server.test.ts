@@ -3,12 +3,19 @@
 import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
+import {
+	DOCUMENT_COLLECTION_BATCH_MAX_BYTES,
+	DOCUMENT_COLLECTION_NOTE_MAX_BYTES,
+	type DocumentCollectionBatchRequest,
+	type DocumentCollectionNoteRequest,
+} from '../../src/platforms/feishu/bridge-protocol';
 import type { BridgeTransactionWriter, DocumentBundleWriter } from './types';
 import {
 	BridgeHttpServer,
 	hashPairingToken,
+	validateDocumentCollectionBatch,
 } from './server';
-import { TransactionStore } from './transaction-store';
+import { BridgeProtocolError, TransactionStore } from './transaction-store';
 
 const servers: BridgeHttpServer[] = [];
 
@@ -16,9 +23,36 @@ afterEach(async () => {
 	await Promise.all(servers.splice(0).map(server => server.stop()));
 });
 
+function collectionNote(pageId: string, byteLength: number): DocumentCollectionNoteRequest {
+	return {
+		pageId,
+		path: `Docs/${pageId}.md`,
+		content: String(byteLength),
+		contentHash: '12345678',
+	};
+}
+
+function collectionBatch(...byteLengths: number[]): DocumentCollectionBatchRequest {
+	return {
+		notes: byteLengths.map((byteLength, index) => collectionNote(String(index), byteLength)),
+	};
+}
+
+function expectBridgeError(run: () => unknown, code: string, status: number): void {
+	try {
+		run();
+	} catch (error) {
+		expect(error).toBeInstanceOf(BridgeProtocolError);
+		expect(error).toMatchObject({ code, status });
+		return;
+	}
+	throw new Error(`Expected BridgeProtocolError ${code}`);
+}
+
 function createWriter(): BridgeTransactionWriter & DocumentBundleWriter {
 	return {
 		documentNoteExists: vi.fn(async () => true),
+		renameDocumentCollectionFolder: vi.fn(async () => undefined),
 		reserveAssetPath: vi.fn((_transactionId, index, filename) =>
 			`Attachments/${index}-${filename}`
 		),
@@ -41,6 +75,60 @@ function createWriter(): BridgeTransactionWriter & DocumentBundleWriter {
 		release: vi.fn(),
 	};
 }
+
+describe('validateDocumentCollectionBatch', () => {
+	const contentByteLength = (content: string): number => Number(content);
+
+	test('keeps ordinary batches capped at 50 notes and 10 MiB', () => {
+		expectBridgeError(
+			() => validateDocumentCollectionBatch({
+				notes: Array.from({ length: 51 }, (_, index) => collectionNote(String(index), 1)),
+			}, contentByteLength),
+			'invalid_document_count',
+			400
+		);
+		expectBridgeError(
+			() => validateDocumentCollectionBatch(
+				collectionBatch(6 * 1024 * 1024, 6 * 1024 * 1024),
+				contentByteLength
+			),
+			'document_batch_too_large',
+			413
+		);
+	});
+
+	test('allows one oversized batch note but rejects mixing it with another note', () => {
+		expect(validateDocumentCollectionBatch(
+			collectionBatch(DOCUMENT_COLLECTION_BATCH_MAX_BYTES + 1),
+			contentByteLength
+		)).toMatchObject({ notes: [expect.objectContaining({ pageId: '0' })] });
+
+		expectBridgeError(
+			() => validateDocumentCollectionBatch(
+				collectionBatch(DOCUMENT_COLLECTION_BATCH_MAX_BYTES + 1, 1),
+				contentByteLength
+			),
+			'document_batch_too_large',
+			413
+		);
+	});
+
+	test('allows up to 64 MiB for one Markdown note', () => {
+		expect(validateDocumentCollectionBatch(
+			collectionBatch(DOCUMENT_COLLECTION_NOTE_MAX_BYTES),
+			contentByteLength
+		)).toMatchObject({ notes: [expect.objectContaining({ pageId: '0' })] });
+
+		expectBridgeError(
+			() => validateDocumentCollectionBatch(
+				collectionBatch(DOCUMENT_COLLECTION_NOTE_MAX_BYTES + 1),
+				contentByteLength
+			),
+			'document_note_too_large',
+			413
+		);
+	});
+});
 
 describe('BridgeHttpServer', () => {
 	test('allows a browser-extension private-network preflight', async () => {
@@ -289,6 +377,68 @@ describe('BridgeHttpServer', () => {
 		});
 		expect(writer.commit).toHaveBeenCalledTimes(1);
 	});
+
+	test('accepts an exclusive document collection batch above 20 MiB', async () => {
+		const writer = createWriter();
+		const store = new TransactionStore(writer, {
+			maxAssetBytes: 1024,
+			maxTransactionBytes: 4096,
+			transactionTtlMs: 60_000,
+		});
+		const collectionStatus = {
+			collectionId: 'collection-1',
+			resumed: true,
+			totalPages: 1,
+			completedPageIds: ['large'],
+			notePaths: { large: 'Docs/Large.md' },
+			completed: false,
+		};
+		const documentCollections = {
+			create: vi.fn(async () => collectionStatus),
+			getStatus: vi.fn(async () => collectionStatus),
+			writeBatch: vi.fn(async () => collectionStatus),
+			complete: vi.fn(async () => ({ ...collectionStatus, completed: true })),
+		};
+		const server = new BridgeHttpServer({
+			port: 0,
+			pairingTokenHash: hashPairingToken('pairing-token'),
+			vaultName: 'Test Vault',
+			store,
+			documentCollections,
+		});
+		servers.push(server);
+		const port = await server.start();
+		const statusResponse = await fetch(
+			`http://127.0.0.1:${port}/v1/document-collections/collection-1`,
+			{ headers: { Authorization: 'Bearer pairing-token' } }
+		);
+		expect(statusResponse.status).toBe(200);
+		await expect(statusResponse.json()).resolves.toEqual(collectionStatus);
+		expect(documentCollections.getStatus).toHaveBeenCalledWith('collection-1');
+
+		const content = 'x'.repeat(20 * 1024 * 1024 + 1);
+		const response = await fetch(
+			`http://127.0.0.1:${port}/v1/document-collections/collection-1/batches`,
+			{
+				method: 'POST',
+				headers: {
+					Authorization: 'Bearer pairing-token',
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					notes: [{
+						pageId: 'large',
+						path: 'Docs/Large.md',
+						content,
+						contentHash: '12345678',
+					}],
+				}),
+			}
+		);
+
+		expect(response.status).toBe(200);
+		expect(documentCollections.writeBatch).toHaveBeenCalledTimes(1);
+	}, 30_000);
 
 	test('advertises and validates document bundle writes', async () => {
 		const writer = createWriter();

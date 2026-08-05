@@ -1,12 +1,84 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import {
+	createDocumentCollectionBatches,
 	createFeishuSessionContent,
 	DEFAULT_FEISHU_BRIDGE_ENDPOINT,
+	DOCUMENT_COLLECTION_BATCH_MAX_BYTES,
+	DOCUMENT_COLLECTION_NOTE_MAX_BYTES,
 	extractFeishuBridgeAssets,
 	normalizeFeishuBridgeEndpoint,
 	replaceFeishuBridgeAsset,
+	type DocumentCollectionNoteRequest,
 } from './bridge-protocol';
+
+function collectionNote(pageId: string, byteLength: number): DocumentCollectionNoteRequest {
+	return {
+		pageId,
+		path: `Docs/${pageId}.md`,
+		content: String(byteLength),
+		contentHash: '12345678',
+	};
+}
+
+function withMockContentByteLengths<T>(run: () => T): T {
+	vi.stubGlobal('TextEncoder', class {
+		encode(value: string): Uint8Array {
+			return { byteLength: Number(value) } as Uint8Array;
+		}
+	});
+	try {
+		return run();
+	} finally {
+		vi.unstubAllGlobals();
+	}
+}
+
+describe('document collection batching', () => {
+	test('keeps ordinary batches within 50 notes and 10 MiB', () => {
+		withMockContentByteLengths(() => {
+			const countLimited = createDocumentCollectionBatches(
+				Array.from({ length: 51 }, (_, index) => collectionNote(String(index), 1))
+			);
+			expect(countLimited.map(batch => batch.length)).toEqual([50, 1]);
+
+			const byteLimited = createDocumentCollectionBatches([
+				collectionNote('a', 6 * 1024 * 1024),
+				collectionNote('b', 6 * 1024 * 1024),
+			]);
+			expect(byteLimited.map(batch => batch.map(note => note.pageId))).toEqual([
+				['a'],
+				['b'],
+			]);
+		});
+	});
+
+	test('places a note over 10 MiB in an exclusive batch', () => {
+		withMockContentByteLengths(() => {
+			const batches = createDocumentCollectionBatches([
+				collectionNote('before', 1),
+				collectionNote('large', DOCUMENT_COLLECTION_BATCH_MAX_BYTES + 1),
+				collectionNote('after', 1),
+			]);
+			expect(batches.map(batch => batch.map(note => note.pageId))).toEqual([
+				['before'],
+				['large'],
+				['after'],
+			]);
+		});
+	});
+
+	test('allows a 64 MiB note and rejects anything larger', () => {
+		withMockContentByteLengths(() => {
+			expect(createDocumentCollectionBatches([
+				collectionNote('maximum', DOCUMENT_COLLECTION_NOTE_MAX_BYTES),
+			])).toHaveLength(1);
+			expect(() => createDocumentCollectionBatches([
+				collectionNote('too-large', DOCUMENT_COLLECTION_NOTE_MAX_BYTES + 1),
+			])).toThrow(/64 MiB/);
+		});
+	});
+});
 
 describe('Feishu attachment bridge protocol', () => {
 	test('normalizes an explicit loopback endpoint', () => {

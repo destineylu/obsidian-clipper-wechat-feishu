@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { parseHTML } from 'linkedom';
 
 import {
@@ -17,12 +17,14 @@ import {
 	detectDocumentSourceKind,
 	discoverDocumentation,
 	isLikelySphinxDocumentationHtml,
+	normalizeDocumentationBody,
 	normalizeMergedPageBody,
 	parseLlmsTxt,
 	parseDocumentationNavigation,
 	parseSitemapLocations,
 	parseSphinxNavigation,
 	parseSphinxSearchIndex,
+	preserveDocumentationCardGrids,
 	restoreDocumentationCardGrids,
 } from './document-bundle';
 
@@ -73,6 +75,17 @@ describe('documentation source detection', () => {
 			'<div class="navList__abc"><div class="menuItem__abc">获取 API Key</div></div>'
 		)).toBe('sidebar-html');
 	});
+
+	test.each([
+		['MkDocs Material', 'https://docs.example.com/guide/', '<aside class="md-sidebar md-sidebar--primary"><nav class="md-nav"><a href="/guide/start/">Start</a></nav></aside>'],
+		['Read the Docs', 'https://project.readthedocs.io/en/latest/', '<nav class="wy-nav-side"><div class="wy-menu-vertical"><a href="usage.html">Usage</a></div></nav>'],
+		['GitBook', 'https://docs.example.com/', '<aside class="side-sheet group/table-of-contents"><a href="/getting-started">Getting started</a></aside>'],
+		['Nextra', 'https://docs.example.com/docs/', '<aside class="nextra-sidebar"><a href="/docs/install">Install</a></aside>'],
+		['Mintlify', 'https://docs.example.com/', '<aside data-component-part="sidebar"><a href="/quickstart">Quickstart</a></aside>'],
+		['Docsify', 'https://docs.example.com/#/', '<script>window.$docsify={loadSidebar:true}</script><aside class="docsify-sidebar"><div class="sidebar-nav"><a href="#/guide">Guide</a></div></aside>'],
+	])('detects %s through generic framework markers', (_name, url, html) => {
+		expect(detectDocumentSourceKind(url, html)).toBe('sidebar-html');
+	});
 });
 
 describe('Alibaba Bailian official documentation API', () => {
@@ -87,7 +100,7 @@ describe('Alibaba Bailian official documentation API', () => {
 					{
 						title: 'API参考（模型）', url: '/zh/model-studio/model-api-reference/', children: [
 							{ title: '使用 API', children: [
-								{ title: '获取 API Key', url: '/zh/model-studio/get-api-key', alias: '/model-studio/get-api-key', validDocument: true },
+								{ title: '获取 API Key', url: '/zh/model-studio/get-api-key', alias: '/model-studio/get-api-key', id: 1234567, validDocument: true },
 								{ title: '目录节点', alias: '/model-studio/group', validDocument: false },
 							] },
 						],
@@ -103,14 +116,62 @@ describe('Alibaba Bailian official documentation API', () => {
 			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model&url=2712195',
 			menuSource
 		);
-		expect(manifest).toMatchObject({ kind: 'aliyun-dochelp', title: 'API参考（模型）', locale: 'zh-cn' });
+		expect(manifest).toMatchObject({
+			kind: 'aliyun-dochelp',
+			title: '阿里云百炼 · API参考（模型）',
+			locale: 'zh-cn',
+		});
 		expect(manifest.pages).toHaveLength(1);
 		expect(manifest.pages[0]).toMatchObject({
 			docname: 'model-studio/get-api-key',
 			url: 'https://help.aliyun.com/zh/model-studio/get-api-key',
 			contentType: 'aliyun-json',
+			aliyunNodeId: '1234567',
 		});
 		expect(manifest.pages[0].fetchUrl).toContain('document_detail.json?alias=%2Fmodel-studio%2Fget-api-key');
+	});
+
+	test('uses the official page URL when a new menu item exposes only a short alias', () => {
+		const shortAliasMenu = JSON.stringify({
+			code: '200',
+			data: {
+				Data: JSON.stringify({
+					title: '大模型服务平台百炼',
+					children: [
+						{ title: '用户指南（模型）', children: [] },
+						{ title: '用户指南（应用）', children: [] },
+						{
+							title: 'API参考（模型）',
+							url: '/zh/model-studio/model-api-reference/',
+							children: [{
+								title: '客户端事件',
+								url: '/zh/model-studio/client-events',
+								alias: '/client-events',
+								validDocument: true,
+							}],
+						},
+						{ title: 'API参考（应用）', children: [] },
+					],
+				}),
+			},
+		});
+
+		const manifest = buildAliyunDocHelpManifest(
+			'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model',
+			shortAliasMenu
+		);
+
+		expect(manifest.pages[0]).toMatchObject({
+			docname: 'model-studio/client-events',
+			url: 'https://help.aliyun.com/zh/model-studio/client-events',
+		});
+		expect(manifest.pages[0].fetchUrl).toContain(
+			'alias=%2Fmodel-studio%2Fclient-events'
+		);
+		expect(manifest.navigation?.[0].children[0]).toMatchObject({
+			title: '客户端事件',
+			docname: 'model-studio/client-events',
+		});
 	});
 
 	test('collects HTML from the official document detail JSON response', async () => {
@@ -159,6 +220,95 @@ describe('Alibaba Bailian official documentation API', () => {
 		expect(requestedUrls[1]).not.toBe(requestedUrls[0]);
 		expect(pages[0].body).toContain('重试后取得正文。');
 	});
+
+	test('uses the document nodeId endpoint after repeated empty alias responses', async () => {
+		vi.useFakeTimers();
+		try {
+			const manifest = buildAliyunDocHelpManifest(
+				'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model',
+				menuSource
+			);
+			let aliasRequests = 0;
+			let nodeIdRequests = 0;
+			const collection = collectDocumentPages({
+				manifest,
+				template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+				documentParser: { parseFromString: source => parseHTML(source).document },
+				fetchText: async url => {
+					if (url.includes('nodeId=1234567')) {
+						nodeIdRequests += 1;
+						return {
+							ok: true,
+							status: 200,
+							finalUrl: url,
+							text: JSON.stringify({ data: { title: '获取 API Key', content: '<h1>获取 API Key</h1><p>nodeId 兜底正文。</p>' } }),
+						};
+					}
+					aliasRequests += 1;
+					return {
+						ok: true,
+						status: 200,
+						finalUrl: url,
+						text: JSON.stringify({ code: 200, success: true, data: { title: '获取 API Key', content: '' } }),
+					};
+				},
+			});
+			await vi.runAllTimersAsync();
+			const pages = await collection;
+			expect(aliasRequests).toBe(4);
+			expect(nodeIdRequests).toBe(1);
+			expect(pages[0].body).toContain('nodeId 兜底正文。');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test('retries the public HTML page after alias and nodeId responses stay empty', async () => {
+		vi.useFakeTimers();
+		try {
+			const manifest = buildAliyunDocHelpManifest(
+				'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api/?type=model',
+				menuSource
+			);
+			let jsonRequests = 0;
+			let publicPageRequests = 0;
+			const publicPageUrls: string[] = [];
+			const collection = collectDocumentPages({
+				manifest,
+				template: { id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}', path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [] },
+				documentParser: { parseFromString: source => parseHTML(source).document },
+				fetchText: async url => {
+					if (url.includes('document_detail.json')) {
+						jsonRequests += 1;
+						return {
+							ok: true,
+							status: 200,
+							finalUrl: url,
+							text: JSON.stringify({ code: 200, success: true, data: { title: '获取 API Key', content: '' } }),
+						};
+					}
+					publicPageRequests += 1;
+					publicPageUrls.push(url);
+					return {
+						ok: true,
+						status: 200,
+						finalUrl: url,
+						text: publicPageRequests === 1
+							? '<!doctype html><html><body>临时空页面</body></html>'
+							: '<!doctype html><html><head><title>获取 API Key</title></head><body><main class="icms-help-docs-content"><h1>获取 API Key</h1><p>公开页面兜底正文。</p></main></body></html>',
+					};
+				},
+			});
+			await vi.runAllTimersAsync();
+			const pages = await collection;
+			expect(jsonRequests).toBe(7);
+			expect(publicPageRequests).toBe(2);
+			expect(publicPageUrls[1]).toContain('_clipper_fallback=');
+			expect(pages[0].body).toContain('公开页面兜底正文。');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 describe('VitePress documentation discovery', () => {
@@ -170,7 +320,12 @@ describe('VitePress documentation discovery', () => {
 			html
 		);
 
-		expect(manifest).toMatchObject({ kind: 'vitepress', locale: 'zh-cn', rootUrl: 'https://www.openai-hk.com/docs/' });
+		expect(manifest).toMatchObject({
+			kind: 'vitepress',
+			title: 'OpenAi-HK - zh-CN',
+			locale: 'zh-cn',
+			rootUrl: 'https://www.openai-hk.com/docs/',
+		});
 		expect(manifest.pages.map(page => page.url)).toEqual([
 			'https://www.openai-hk.com/docs/getting-started.html',
 			'https://www.openai-hk.com/docs/price.html',
@@ -204,7 +359,11 @@ describe('VitePress documentation discovery', () => {
 			fetchText: async () => ({ ok: false, status: 404, text: '' }),
 			documentParser: { parseFromString: source => parseHTML(source).document },
 		});
-		expect(manifest).toMatchObject({ kind: 'vitepress', rootUrl: 'https://www.openai-hk.com/docs/' });
+		expect(manifest).toMatchObject({
+			kind: 'vitepress',
+			title: 'OpenAi-HK - zh-CN',
+			rootUrl: 'https://www.openai-hk.com/docs/',
+		});
 		expect(manifest.pages.map(page => page.docname)).toEqual(['getting-started', 'price']);
 		expect(manifest.navigation?.[0]).toMatchObject({ title: '✅ 快速接入', docname: 'getting-started' });
 	});
@@ -224,7 +383,12 @@ describe('official HTML sidebar discovery', () => {
 			</body></html>`,
 			{ parseFromString: source => parseHTML(source).document }
 		);
-		expect(manifest).toMatchObject({ kind: 'sidebar-html', locale: 'zh-cn', rootUrl: 'https://api-docs.siliconflow.cn/docs/' });
+		expect(manifest).toMatchObject({
+			kind: 'sidebar-html',
+			title: 'SiliconFlow API Documentation',
+			locale: 'zh-cn',
+			rootUrl: 'https://api-docs.siliconflow.cn/docs/',
+		});
 		expect(manifest.pages.map(page => page.url)).toEqual([
 			'https://api-docs.siliconflow.cn/docs/userguide/introduction',
 			'https://api-docs.siliconflow.cn/docs/userguide/quickstart',
@@ -235,6 +399,33 @@ describe('official HTML sidebar discovery', () => {
 		expect(manifest.pages.slice(-2).map(page => page.docname)).toEqual([
 			'api/batches-batch_id-get',
 			'api/batches-batch_id-cancel-post',
+		]);
+	});
+
+	test('recognizes xKiro and uses its site-level documentation title', () => {
+		const html = `<html lang="en"><head>
+			<title>xKiro API Documentation</title>
+			<meta name="application-name" content="xKiro Docs">
+			<meta property="og:site_name" content="xKiro Docs">
+			</head><body><aside class="thin-scroll"><nav>
+			<a href="/guides/quickstart/">Quickstart</a>
+			<a href="/api/reference/">API Reference</a>
+			</nav></aside></body></html>`;
+		expect(detectDocumentSourceKind('https://docs.xkiro.com/', html)).toBe('sidebar-html');
+		const manifest = buildHtmlSidebarManifest(
+			'https://docs.xkiro.com/',
+			html,
+			{ parseFromString: source => parseHTML(source).document }
+		);
+		expect(manifest).toMatchObject({
+			kind: 'sidebar-html',
+			title: 'xKiro API Documentation',
+			locale: 'en',
+			rootUrl: 'https://docs.xkiro.com/',
+		});
+		expect(manifest.pages.map(page => page.docname)).toEqual([
+			'guides/quickstart',
+			'api/reference',
 		]);
 	});
 
@@ -344,7 +535,11 @@ describe('Docusaurus sitemap discovery', () => {
 				'https://api-docs.deepseek.com/guides/tool_calls',
 			]
 		);
-		expect(manifest).toMatchObject({ kind: 'docusaurus', locale: 'zh-cn' });
+		expect(manifest).toMatchObject({
+			kind: 'docusaurus',
+			title: 'DeepSeek API Docs - zh-CN',
+			locale: 'zh-cn',
+		});
 		expect(manifest.pages.map(page => page.url)).toEqual([
 			'https://api-docs.deepseek.com/zh-cn/',
 			'https://api-docs.deepseek.com/zh-cn/guides/tool_calls',
@@ -364,7 +559,10 @@ describe('Docusaurus sitemap discovery', () => {
 				'https://joycode.jd.com/accountCenter/account',
 			]
 		);
-		expect(manifest.rootUrl).toBe('https://joycode.jd.com/docs/');
+		expect(manifest).toMatchObject({
+			title: 'JoyCode',
+			rootUrl: 'https://joycode.jd.com/docs/',
+		});
 		expect(manifest.pages.map(page => page.url)).toEqual([
 			'https://joycode.jd.com/docs/changelog',
 			'https://joycode.jd.com/docs/start/getting-started',
@@ -419,6 +617,16 @@ describe('generic llms.txt discovery', () => {
 		expect(buildGenericLlmsTxtManifest(
 			'https://platform.kimi.com/docs/overview', html, parseLlmsTxt(llms)
 		).title).toBe('Kimi API 开放平台');
+	});
+
+	test('uses the page-level site title when a generic llms.txt heading is incomplete', () => {
+		const manifest = buildGenericLlmsTxtManifest(
+			'https://fal.ai/docs/documentation',
+			'<html lang="en"><head><title>fal Docs</title><meta property="og:site_name" content="fal"></head></html>',
+			parseLlmsTxt('# fal\n\n- [Overview](https://fal.ai/docs/documentation.md)')
+		);
+		expect(manifest.title).toBe('fal Docs');
+		expect(manifest.rootUrl).toBe('https://fal.ai/docs/');
 	});
 
 	test('recursively expands same-origin llms.txt indexes and keeps HTML pages', async () => {
@@ -537,6 +745,7 @@ describe('Google DevSite discovery', () => {
 		);
 
 		expect(manifest.kind).toBe('google-devsite');
+		expect(manifest.title).toBe('Gemini API Documentation - zh-CN');
 		expect(manifest.locale).toBe('zh-cn');
 		expect(manifest.pages).toHaveLength(2);
 		expect(manifest.pages[1].fetchUrl).toBe(
@@ -768,6 +977,90 @@ describe('parseDocumentationNavigation', () => {
 			},
 		]);
 	});
+
+	test.each([
+		['MkDocs Material', '<aside class="md-sidebar md-sidebar--primary"><nav class="md-nav"><ul><li><span>Guide</span><ul><li><a href="/docs/start">Start</a></li><li><a href="/docs/install">Install</a></li></ul></li></ul></nav></aside>'],
+		['Read the Docs', '<nav class="wy-nav-side"><div class="wy-menu-vertical"><ul><li><span>Guide</span><ul><li><a href="/docs/start">Start</a></li><li><a href="/docs/install">Install</a></li></ul></li></ul></div></nav>'],
+		['GitBook', '<aside class="side-sheet group/table-of-contents"><ul><li><span>Guide</span><ul><li><a href="/docs/start">Start</a></li><li><a href="/docs/install">Install</a></li></ul></li></ul></aside>'],
+		['Nextra', '<aside class="nextra-sidebar"><ul><li><span>Guide</span><ul><li><a href="/docs/start">Start</a></li><li><a href="/docs/install">Install</a></li></ul></li></ul></aside>'],
+		['Mintlify', '<aside data-component-part="sidebar"><ul><li><span>Guide</span><ul><li><a href="/docs/start">Start</a></li><li><a href="/docs/install">Install</a></li></ul></li></ul></aside>'],
+		['Docsify', '<aside class="docsify-sidebar"><div class="sidebar-nav"><ul><li><span>Guide</span><ul><li><a href="/docs/start">Start</a></li><li><a href="/docs/install">Install</a></li></ul></li></ul></div></aside>'],
+	])('preserves nested sidebar hierarchy for %s', (_name, html) => {
+		const manifest = {
+			kind: 'sidebar-html' as const,
+			title: 'Example Docs',
+			rootUrl: 'https://docs.example.com/docs/',
+			locale: 'en',
+			pages: [
+				{ docname: 'start', title: 'Start', url: 'https://docs.example.com/docs/start' },
+				{ docname: 'install', title: 'Install', url: 'https://docs.example.com/docs/install' },
+			],
+		};
+		const navigation = parseDocumentationNavigation({
+			html,
+			pageUrl: 'https://docs.example.com/docs/start',
+			manifest,
+			documentParser: { parseFromString: source => parseHTML(source).document },
+		});
+		expect(navigation).toEqual([{
+			title: 'Guide',
+			children: [
+				{ docname: 'start', title: 'Start', children: [] },
+				{ docname: 'install', title: 'Install', children: [] },
+			],
+		}]);
+	});
+
+	test('preserves Docsify hash routes as separate pages', () => {
+		const manifest = buildHtmlSidebarManifest(
+			'https://docsify.js.org/#/',
+			`<html><head><title>docsify</title><script>window.$docsify = {}</script></head><body>
+				<nav class="sidebar-nav"><ul>
+					<li><a href="#/">Introduction</a></li>
+					<li><a href="#/quickstart">Quick start</a></li>
+					<li><a href="#/configuration">Configuration</a></li>
+				</ul></nav>
+			</body></html>`,
+			{ parseFromString: source => parseHTML(source).document }
+		);
+		expect(manifest.pages.map(page => page.docname)).toEqual(['index', 'quickstart', 'configuration']);
+		expect(manifest.pages.map(page => page.url)).toEqual([
+			'https://docsify.js.org/#/',
+			'https://docsify.js.org/#/quickstart',
+			'https://docsify.js.org/#/configuration',
+		]);
+	});
+
+	test('uses DOM anchor order when a documentation sidebar has no list markup', () => {
+		const manifest = {
+			kind: 'sidebar-html' as const,
+			title: 'SiliconFlow API Documentation',
+			rootUrl: 'https://api-docs.siliconflow.cn/docs/',
+			locale: 'zh-cn',
+			pages: [
+				{ docname: 'userguide/introduction', title: '平台简介', url: 'https://api-docs.siliconflow.cn/docs/userguide/introduction' },
+				{ docname: 'userguide/quickstart', title: '快速上手', url: 'https://api-docs.siliconflow.cn/docs/userguide/quickstart' },
+				{ docname: 'userguide/capabilities/text-generation', title: '开始使用', url: 'https://api-docs.siliconflow.cn/docs/userguide/capabilities/text-generation' },
+			],
+		};
+		const navigation = parseDocumentationNavigation({
+			html: `<aside><nav>
+				<div><a href="/docs/userguide/quickstart">快速上手</a></div>
+				<div><a href="/docs/userguide/introduction">平台简介</a></div>
+				<div><a href="/docs/userguide/capabilities/text-generation">开始使用</a></div>
+			</nav></aside>`,
+			pageUrl: 'https://api-docs.siliconflow.cn/docs/userguide/quickstart',
+			manifest,
+			documentParser: { parseFromString: source => parseHTML(source).document },
+		});
+
+		expect(navigation[0].title).toBe('userguide');
+		expect(navigation[0].children.map(node => node.docname || node.title)).toEqual([
+			'userguide/quickstart',
+			'userguide/introduction',
+			'capabilities',
+		]);
+	});
 });
 
 describe('documentation card grids', () => {
@@ -782,6 +1075,18 @@ describe('documentation card grids', () => {
 		expect(restored).toContain('display:grid');
 		expect(restored).toContain('Gemini 3.1 Pro');
 		expect(restored).not.toContain('OBSIDIAN\\_DOCUMENT');
+	});
+});
+
+describe('documentation Markdown cleanup', () => {
+	test('repairs joined fences, heading escapes, list indentation, and orphan emphasis', () => {
+		const cleaned = normalizeDocumentationBody(
+			'## 1\\. Start\n\n**\n\n<table><tr><td>A</td></tr></table>\n\n**\n\n```\ncode\n```[Next](https://example.com/next)\n\n\t- child'
+		);
+		expect(cleaned).toContain('## 1. Start');
+		expect(cleaned).not.toContain('\n**\n');
+		expect(cleaned).toContain('```\n\n[Next](https://example.com/next)');
+		expect(cleaned).toContain('  - child');
 	});
 });
 
@@ -815,6 +1120,26 @@ describe('collectDocumentPages', () => {
 		expect(pages[0].noteName).toBe('Intro');
 		expect(pages[0].content).toContain('Use the Messages API.');
 		expect(pages[0].content).toContain('https://platform.claude.com/docs/en/intro');
+	});
+
+	test('restores callout structure and removes previous/next navigation cards from HTML docs', () => {
+		const prepared = preserveDocumentationCardGrids(
+			`<html lang="zh-CN"><head><title>指南</title></head><body><article>
+				<h1>指南</h1><p>正文。</p>
+				<div class="note note-important"><div class="noteContentSpan"><strong>重要</strong><p>请妥善保存密钥。</p></div></div>
+				<div class="@container grid gap-4 pb-6 grid-cols-2">
+					<a href="/docs/previous">上一篇说明</a><a href="/docs/next">下一篇说明</a>
+				</div>
+			</article></body></html>`,
+			'https://docs.example.com/docs/guide',
+			{ parseFromString: source => parseHTML(source).document }
+		);
+		const document = parseHTML(prepared).document;
+		const callout = document.querySelector('blockquote');
+		expect(callout?.textContent).toContain('[!IMPORTANT] 重要');
+		expect(callout?.textContent).toContain('请妥善保存密钥。');
+		expect(document.body.textContent).not.toContain('上一篇说明');
+		expect(document.body.textContent).not.toContain('下一篇说明');
 	});
 
 	test('normalizes documentation titles, boilerplate, relative links and duplicate redirects', async () => {
@@ -975,6 +1300,68 @@ describe('collectDocumentPages', () => {
 		expect(manifest.pages).toHaveLength(2);
 		expect(manifest.pages[0].title).toBe('获取 API Key');
 	});
+
+	test('splits SenseNova sections in sidebar order and preserves section groups', async () => {
+		const snapshots = [
+			{
+				url: 'https://platform.sensenova.cn/docs#overview',
+				title: 'SenseNova AI API 文档',
+				group: '入门',
+				html: '<html lang="zh-CN"><head><title>SenseNova AI API 文档</title></head><body><main><h1>SenseNova AI API 文档</h1><p>概览正文</p></main></body></html>',
+			},
+			{
+				url: 'https://platform.sensenova.cn/docs#quickstart',
+				title: '快速开始',
+				group: '入门',
+				html: '<html lang="zh-CN"><head><title>快速开始</title></head><body><main><h1>快速开始</h1><p>快速开始正文</p></main></body></html>',
+			},
+			{
+				url: 'https://platform.sensenova.cn/docs#model-flash',
+				title: 'SenseNova 6.7 Flash-Lite',
+				group: '模型',
+				html: '<html lang="zh-CN"><head><title>SenseNova 6.7 Flash-Lite</title></head><body><main><h1>SenseNova 6.7 Flash-Lite</h1><p>模型正文</p></main></body></html>',
+			},
+		];
+		const manifest = buildInteractiveSidebarManifest(
+			'https://platform.sensenova.cn/docs',
+			'<html lang="zh-CN"><head><title>SenseNova · LLM API 服务平台</title></head></html>',
+			snapshots
+		);
+		expect(manifest.rootUrl).toBe('https://platform.sensenova.cn/');
+		expect(manifest.pages).toHaveLength(3);
+		expect(manifest.navigation).toEqual([
+			{
+				title: '入门',
+				children: [
+					{ docname: 'docs-overview', title: 'SenseNova AI API 文档', children: [] },
+					{ docname: 'docs-quickstart', title: '快速开始', children: [] },
+				],
+			},
+			{
+				title: '模型',
+				children: [
+					{ docname: 'docs-model-flash', title: 'SenseNova 6.7 Flash-Lite', children: [] },
+				],
+			},
+		]);
+
+		const pages = await collectDocumentPages({
+			manifest,
+			template: {
+				id: 'default', name: 'Default', behavior: 'create', noteNameFormat: '{{title}}',
+				path: '', noteContentFormat: '{{content}}', context: '', properties: [], triggers: [],
+			},
+			documentParser: { parseFromString: source => parseHTML(source).document },
+			fetchText: async () => ({ ok: false, status: 500, text: '' }),
+			pageSnapshots: new Map(snapshots.map(snapshot => [snapshot.url, snapshot.html])),
+			seenSourceUrls: new Set<string>(),
+		});
+		expect(pages.map(page => page.title)).toEqual([
+			'SenseNova AI API 文档',
+			'快速开始',
+			'SenseNova 6.7 Flash-Lite',
+		]);
+	});
 });
 
 describe('buildDocumentBundleOutput', () => {
@@ -999,11 +1386,11 @@ describe('buildDocumentBundleOutput', () => {
 
 		expect(output.folderPath).toBe('Reference/Example docs');
 		expect(output.notes.map(note => note.path)).toEqual([
-			'Reference/Example docs/Example docs.md',
-			'Reference/Example docs/guide/Install.md',
+			'Reference/Example docs/01 - Example docs.md',
+			'Reference/Example docs/02 - guide/01 - Install.md',
 			'Reference/Example docs/00 - Documentation index.md',
 		]);
-		expect(output.indexContent).toContain('[[Reference/Example docs/guide/Install|Install]]');
+		expect(output.indexContent).toContain('[[Reference/Example docs/02 - guide/01 - Install|Install]]');
 		expect(output.indexContent).toContain('https://docs.example.com/en/stable/');
 		expect(output.mergedContent).toContain('## Install');
 		expect(output.mergedContent).toContain('Source: https://docs.example.com/en/stable/guide/install.html');
@@ -1026,15 +1413,15 @@ describe('buildDocumentBundleOutput', () => {
 		});
 
 		expect(output.notes.slice(0, 2).map(note => note.path)).toEqual([
-			'Docs/a/Same.md',
-			'Docs/a/Same - other.md',
+			'Docs/01 - a/01 - Same.md',
+			'Docs/01 - a/02 - Same.md',
 		]);
 	});
 
 	test('renders virtual navigation groups as section headings using sidebar labels', () => {
 		const manifest = {
 			kind: 'google-devsite' as const,
-			title: 'Gemini API documentation - zh-cn',
+			title: 'Gemini API Documentation - zh-CN',
 			rootUrl: 'https://ai.google.dev/gemini-api/docs/',
 			locale: 'zh-cn',
 			pages: [
@@ -1056,8 +1443,8 @@ describe('buildDocumentBundleOutput', () => {
 		});
 
 		expect(output.indexContent).toContain('## 目录');
-		expect(output.indexContent).toContain('## 开始使用\n\n- [[Gemini API documentation - zh-cn/开始使用/使用入门|快速开始]]');
-		expect(output.indexContent).toContain('## 模型\n\n- [[Gemini API documentation - zh-cn/模型/模型|所有模型]]');
+		expect(output.indexContent).toContain('## 开始使用\n\n- [[Gemini API Documentation - zh-CN/01 - 开始使用/01 - 使用入门|快速开始]]');
+		expect(output.indexContent).toContain('## 模型\n\n- [[Gemini API Documentation - zh-CN/02 - 模型/01 - 模型|所有模型]]');
 		expect(output.indexContent).not.toContain('- **开始使用**');
 	});
 
@@ -1085,10 +1472,10 @@ describe('buildDocumentBundleOutput', () => {
 			basePath: '',
 		});
 
-		expect(output.indexContent).toContain('- [[Docs/Guide|Guide]]\n  - [[Docs/Guide/Install|Install]]');
+		expect(output.indexContent).toContain('- [[Docs/01 - Guide|Guide]]\n  - [[Docs/01 - Guide/01 - Install|Install]]');
 		expect(output.notes.slice(0, 2).map(note => note.path)).toEqual([
-			'Docs/Guide.md',
-			'Docs/Guide/Install.md',
+			'Docs/01 - Guide.md',
+			'Docs/01 - Guide/01 - Install.md',
 		]);
 		expect(output.mergedContent).toContain('## Guide\n\nSource: https://docs.example.com/guide.html');
 		expect(output.mergedContent).toContain('### Install\n\nSource: https://docs.example.com/install.html');

@@ -16,6 +16,7 @@ import {
 	DOCUMENT_COLLECTION_BATCH_MAX_BYTES,
 	DOCUMENT_COLLECTION_BATCH_MAX_NOTES,
 	DOCUMENT_COLLECTION_CAPABILITY,
+	DOCUMENT_COLLECTION_NOTE_MAX_BYTES,
 	FEISHU_BRIDGE_PROTOCOL_VERSION,
 	FEISHU_BRIDGE_RESUMABLE_CAPABILITY,
 	type FeishuBridgeQueueAssetsRequest,
@@ -38,7 +39,7 @@ interface BridgeHttpServerOptions {
 	vaultName: string;
 	store: TransactionStore;
 	documentBundleWriter?: DocumentBundleWriter;
-	documentCollections?: Pick<DocumentCollectionStore, 'create' | 'writeBatch' | 'complete'>;
+	documentCollections?: Pick<DocumentCollectionStore, 'create' | 'getStatus' | 'writeBatch' | 'complete'>;
 	resumable?: {
 		store: Pick<
 			ResumableSessionStore,
@@ -57,6 +58,7 @@ const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024;
 // JSON escaping can nearly double Markdown containing many backslashes/newlines.
 // The decoded content limit remains DOCUMENT_BUNDLE_MAX_BYTES below.
 const MAX_DOCUMENT_BUNDLE_BODY_BYTES = DOCUMENT_BUNDLE_MAX_BYTES * 2 + 1024 * 1024;
+const MAX_DOCUMENT_COLLECTION_BODY_BYTES = DOCUMENT_COLLECTION_NOTE_MAX_BYTES * 2 + 1024 * 1024;
 
 function isSafeNotePath(path: string): boolean {
 	const normalized = path.replace(/\\/g, '/').trim();
@@ -101,7 +103,10 @@ function validateDocumentBundleRequest(body: unknown): DocumentBundleWriteReques
 	return request as DocumentBundleWriteRequest;
 }
 
-function validateDocumentCollectionBatch(body: unknown): DocumentCollectionBatchRequest {
+export function validateDocumentCollectionBatch(
+	body: unknown,
+	contentByteLength: (content: string) => number = content => Buffer.byteLength(content, 'utf8')
+): DocumentCollectionBatchRequest {
 	if (!body || typeof body !== 'object' || !Array.isArray((body as DocumentCollectionBatchRequest).notes)) {
 		throw new BridgeProtocolError('invalid_document_batch', 400, '文档集合批次无效');
 	}
@@ -119,10 +124,14 @@ function validateDocumentCollectionBatch(body: unknown): DocumentCollectionBatch
 		}
 		if (pageIds.has(note.pageId)) throw new BridgeProtocolError('duplicate_document_page', 400, '文档集合包含重复页面');
 		pageIds.add(note.pageId);
-		totalBytes += Buffer.byteLength(note.content, 'utf8');
-		if (totalBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) {
-			throw new BridgeProtocolError('document_batch_too_large', 413, '文档集合批次内容超过限制');
+		const noteBytes = contentByteLength(note.content);
+		if (noteBytes > DOCUMENT_COLLECTION_NOTE_MAX_BYTES) {
+			throw new BridgeProtocolError('document_note_too_large', 413, '单篇 Markdown 超过 64 MiB 限制');
 		}
+		totalBytes += noteBytes;
+	}
+	if (request.notes.length > 1 && totalBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) {
+		throw new BridgeProtocolError('document_batch_too_large', 413, '文档集合批次内容超过限制');
 	}
 	return request;
 }
@@ -344,9 +353,18 @@ export class BridgeHttpServer {
 				return;
 			}
 
+			const collectionStatusMatch = url.pathname.match(/^\/v1\/document-collections\/([^/]+)$/);
+			if (request.method === 'GET' && collectionStatusMatch && this.options.documentCollections) {
+				const result = await this.options.documentCollections.getStatus(
+					decodeURIComponent(collectionStatusMatch[1])
+				);
+				sendJson(response, 200, result);
+				return;
+			}
+
 			const collectionBatchMatch = url.pathname.match(/^\/v1\/document-collections\/([^/]+)\/batches$/);
 			if (request.method === 'POST' && collectionBatchMatch && this.options.documentCollections) {
-				const body = validateDocumentCollectionBatch(await readJson<unknown>(request, DOCUMENT_COLLECTION_BATCH_MAX_BYTES * 2));
+				const body = validateDocumentCollectionBatch(await readJson<unknown>(request, MAX_DOCUMENT_COLLECTION_BODY_BYTES));
 				const result = await this.options.documentCollections.writeBatch(
 					decodeURIComponent(collectionBatchMatch[1]),
 					body

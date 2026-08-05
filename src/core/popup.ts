@@ -1,7 +1,7 @@
 import dayjs from 'dayjs';
 import { Template, Property, PromptVariable } from '../types/types';
 import { incrementStat, addHistoryEntry, getClipHistory } from '../utils/storage-utils';
-import { generateFrontmatter, saveToObsidian } from '../utils/obsidian-note-creator';
+import { generateFrontmatter, openObsidianNote, saveToObsidian } from '../utils/obsidian-note-creator';
 import { extractPageContent, initializePageContent } from '../utils/content-extractor';
 import { compileTemplate } from '../utils/template-compiler';
 import { initializeIcons, getPropertyTypeIcon } from '../icons/icons';
@@ -36,18 +36,23 @@ import {
 	buildInteractiveSidebarManifest,
 	collectDocumentPages,
 	detectDocumentSourceKind,
+	documentCollectionFolderPath,
 	discoverDocumentation,
+	parseDocumentationNavigation,
 	DOCUMENT_BUNDLE_MERGED_MAX_PAGES,
 	type FetchTextResult,
 } from './document-bundle';
 import { loadPlatformSettings } from '../platforms/settings';
 import { FeishuBridgeClient } from '../platforms/feishu/bridge-client';
 import {
+	createDocumentCollectionBatches,
 	DOCUMENT_BUNDLE_CAPABILITY,
-	DOCUMENT_COLLECTION_BATCH_MAX_BYTES,
-	DOCUMENT_COLLECTION_BATCH_MAX_NOTES,
 	DOCUMENT_COLLECTION_CAPABILITY,
+	DOCUMENT_COLLECTION_PATH_LAYOUT_VERSION,
+	type DocumentCollectionBatchRequest,
+	type DocumentCollectionCreateRequest,
 	type DocumentCollectionNoteRequest,
+	type DocumentCollectionStatusResponse,
 } from '../platforms/feishu/bridge-protocol';
 
 interface ReaderModeResponse {
@@ -558,6 +563,9 @@ function setupMessageListeners() {
 				}
 			}
 		} else if (request.action === "activeTabChanged") {
+			// Keep an active documentation collection pinned to its original source tab.
+			// Refreshing the side panel mid-run used to replace the HTML and manifest context.
+			if (isDocumentBundleBusy) return;
 			// Only handle active tab changes if we're in side panel mode, not iframe mode
 			if (!isIframe) {
 				currentTabId = request.tabId;
@@ -1985,23 +1993,84 @@ function documentContentHash(content: string): string {
 	return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function documentCollectionBatches(notes: DocumentCollectionNoteRequest[]): DocumentCollectionNoteRequest[][] {
-	const batches: DocumentCollectionNoteRequest[][] = [];
-	let batch: DocumentCollectionNoteRequest[] = [];
-	let bytes = 0;
-	for (const note of notes) {
-		const noteBytes = new TextEncoder().encode(note.content).byteLength;
-		if (noteBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) throw new Error('单篇文档超过配套插件的 10 MiB 批次限制');
-		if (batch.length >= DOCUMENT_COLLECTION_BATCH_MAX_NOTES || bytes + noteBytes > DOCUMENT_COLLECTION_BATCH_MAX_BYTES) {
-			batches.push(batch);
-			batch = [];
-			bytes = 0;
-		}
-		batch.push(note);
-		bytes += noteBytes;
+function isRecoverableDocumentCollectionError(error: unknown): boolean {
+	const code = (error as { code?: string } | null)?.code;
+	return code === 'request_timeout' || code === 'bridge_unreachable';
+}
+
+function collectionContainsPageIds(
+	status: DocumentCollectionStatusResponse,
+	pageIds: Iterable<string>
+): boolean {
+	const completed = new Set(status.completedPageIds);
+	for (const pageId of pageIds) {
+		if (!completed.has(pageId)) return false;
 	}
-	if (batch.length) batches.push(batch);
-	return batches;
+	return true;
+}
+
+async function createDocumentCollectionConfirmed(
+	client: FeishuBridgeClient,
+	request: DocumentCollectionCreateRequest
+): Promise<DocumentCollectionStatusResponse> {
+	try {
+		return await client.createDocumentCollection(request);
+	} catch (error) {
+		if (!isRecoverableDocumentCollectionError(error)) throw error;
+		const status = await client.getDocumentCollectionStatus(request.collectionId).catch(() => null);
+		if (status && status.totalPages === request.totalPages) return status;
+		return client.createDocumentCollection(request);
+	}
+}
+
+async function writeDocumentCollectionBatchConfirmed(
+	client: FeishuBridgeClient,
+	collectionId: string,
+	request: DocumentCollectionBatchRequest
+): Promise<DocumentCollectionStatusResponse> {
+	try {
+		return await client.writeDocumentCollectionBatch(collectionId, request);
+	} catch (error) {
+		if (!isRecoverableDocumentCollectionError(error)) throw error;
+		try {
+			return await client.writeDocumentCollectionBatch(collectionId, request);
+		} catch (retryError) {
+			if (!isRecoverableDocumentCollectionError(retryError)) throw retryError;
+			const requestedPageIds = request.notes.map(note => note.pageId);
+			const status = await client.getDocumentCollectionStatus(collectionId).catch(() => null);
+			if (status && collectionContainsPageIds(status, requestedPageIds)) return status;
+			throw retryError;
+		}
+	}
+}
+
+async function completeDocumentCollectionConfirmed(
+	client: FeishuBridgeClient,
+	collectionId: string,
+	expectedPageIds: string[]
+): Promise<DocumentCollectionStatusResponse> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			const completed = await client.completeDocumentCollection(collectionId, { expectedPageIds });
+			if (
+				completed.completed &&
+				collectionContainsPageIds(completed, [...expectedPageIds, '__index__'])
+			) return completed;
+			lastError = new Error('配套插件未确认文档集合已经完整保存');
+		} catch (error) {
+			lastError = error;
+			if (!isRecoverableDocumentCollectionError(error)) throw error;
+		}
+
+		const status = await client.getDocumentCollectionStatus(collectionId).catch(() => null);
+		if (
+			status?.completed &&
+			collectionContainsPageIds(status, [...expectedPageIds, '__index__'])
+		) return status;
+		if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 750 * (attempt + 1)));
+	}
+	throw lastError instanceof Error ? lastError : new Error('配套插件未能完成文档集合确认');
 }
 
 function triggerDocumentBundleFromUi(): void {
@@ -2026,13 +2095,14 @@ async function handleDocumentBundle(): Promise<void> {
 
 	try {
 		const prepared = await requirePreparedPageContext();
+		const sourceDocumentHtml = currentDocumentHtml;
 		const isAliyunBailian = new URL(prepared.url).hostname === 'bailian.console.aliyun.com';
 		const isSenseNova = new URL(prepared.url).hostname === 'platform.sensenova.cn';
 		const manifest = isAliyunBailian
 			? buildAliyunDocHelpManifest(prepared.url, await fetchAliyunDocumentationMenu())
 			: await discoverDocumentation({
 				currentUrl: prepared.url,
-				currentHtml: currentDocumentHtml,
+				currentHtml: sourceDocumentHtml,
 				fetchText: fetchDocumentationText,
 				documentParser: {
 					parseFromString: (html, mimeType) => new DOMParser().parseFromString(
@@ -2041,8 +2111,59 @@ async function handleDocumentBundle(): Promise<void> {
 					),
 				},
 			});
+		if (manifest.kind === 'docusaurus' && sourceDocumentHtml.includes('menu__list-item--collapsed')) {
+			const expandedSidebar = await browser.tabs.sendMessage(prepared.tabId, {
+				action: 'getExpandedDocumentationSidebar',
+			}).catch(() => null) as { html?: string } | null;
+			if (expandedSidebar?.html) {
+				manifest.navigation = parseDocumentationNavigation({
+					html: expandedSidebar.html,
+					pageUrl: prepared.url,
+					manifest,
+					documentParser: {
+						parseFromString: (html, mimeType) => new DOMParser().parseFromString(
+							html,
+							mimeType as DOMParserSupportedType
+						),
+					},
+				});
+			}
+		}
 		let pageSnapshots = new Map<string, string>();
-		if (!isAliyunBailian && !isSenseNova && (currentDocumentHtml.includes('menuItem') || currentDocumentHtml.includes('navList'))) {
+		const isDocsify = /window\.[\$]?docsify\s*=|window\.\$docsify\s*=|class=["'][^"']*(?:docsify-sidebar|sidebar-nav)/i.test(sourceDocumentHtml);
+		if (isDocsify) {
+			const snapshotResponse = await browser.tabs.sendMessage(prepared.tabId, {
+				action: 'collectDocsifySnapshots',
+			}).catch(() => null) as { snapshots?: { url: string; title: string; html: string }[]; error?: string } | null;
+			if (snapshotResponse?.error) {
+				throw new Error(`Docsify 文档采集失败：${snapshotResponse.error}`);
+			}
+			const snapshots = snapshotResponse?.snapshots || [];
+			if (snapshots.length > 1) {
+				pageSnapshots = new Map(snapshots.map(snapshot => [snapshot.url, snapshot.html]));
+				Object.assign(manifest, buildInteractiveSidebarManifest(prepared.url, sourceDocumentHtml, snapshots));
+			}
+		}
+		if (isSenseNova) {
+			const snapshotResponse = await browser.tabs.sendMessage(prepared.tabId, {
+				action: 'collectSenseNovaDocumentationSections',
+			}).catch(() => null) as {
+				snapshots?: { url: string; title: string; html: string; group?: string }[];
+				error?: string;
+			} | null;
+			if (snapshotResponse?.error) {
+				throw new Error(`SenseNova 文档章节采集失败：${snapshotResponse.error}`);
+			}
+			const snapshots = snapshotResponse?.snapshots || [];
+			if (snapshots.length > 1) {
+				pageSnapshots = new Map(snapshots.map(snapshot => [snapshot.url, snapshot.html]));
+				Object.assign(
+					manifest,
+					buildInteractiveSidebarManifest(prepared.url, sourceDocumentHtml, snapshots)
+				);
+			}
+		}
+		if (!isAliyunBailian && !isSenseNova && !isDocsify && (sourceDocumentHtml.includes('menuItem') || sourceDocumentHtml.includes('navList'))) {
 			const snapshotResponse = await browser.tabs.sendMessage(prepared.tabId, {
 				action: 'collectDocumentationSnapshots',
 				selector: '[class*="menuItem"]',
@@ -2053,7 +2174,7 @@ async function handleDocumentBundle(): Promise<void> {
 			const snapshots = snapshotResponse?.snapshots || [];
 			if (snapshots.length > 1) {
 				pageSnapshots = new Map(snapshots.map(snapshot => [snapshot.url, snapshot.html]));
-				Object.assign(manifest, buildInteractiveSidebarManifest(prepared.url, currentDocumentHtml, snapshots));
+				Object.assign(manifest, buildInteractiveSidebarManifest(prepared.url, sourceDocumentHtml, snapshots));
 			}
 		}
 		const bundleClient = await findDocumentBundleClient(selectedVault);
@@ -2090,18 +2211,26 @@ async function handleDocumentBundle(): Promise<void> {
 			),
 		};
 		let savedNoteCount = manifest.pages.length + 1;
+		let savedIndexPath: string | null = null;
 		if (bundleClient?.resumable) {
 			const collectionId = manifest.collectionId || `${manifest.kind}-documentation`;
-			let collection = await bundleClient.client.createDocumentCollection({
+			const folderPath = documentCollectionFolderPath(manifest.title, basePath);
+			const collectionRequest: DocumentCollectionCreateRequest = {
 				collectionId,
 				title: manifest.title,
 				rootUrl: manifest.rootUrl,
 				locale: manifest.locale || 'und',
 				totalPages: manifest.pages.length,
-			});
-			const completed = collection.resumed ? new Set(collection.completedPageIds) : new Set<string>();
-			completed.delete('__index__');
-			const acceptedPageIds = new Set(completed);
+				folderPath,
+				pathLayoutVersion: DOCUMENT_COLLECTION_PATH_LAYOUT_VERSION,
+			};
+			let collection = await createDocumentCollectionConfirmed(
+				bundleClient.client,
+				collectionRequest
+			);
+			const completed = collection.resumed
+				? new Set(collection.completedPageIds.filter(pageId => pageId !== '__index__'))
+				: new Set<string>();
 			const seenSourceUrls = new Set<string>();
 			const pendingPages = manifest.pages.filter(page => !completed.has(page.docname));
 			for (let offset = 0; offset < pendingPages.length; offset += 20) {
@@ -2114,7 +2243,7 @@ async function handleDocumentBundle(): Promise<void> {
 					documentParser,
 					fetchText: fetchDocumentationText,
 					currentPageUrl: prepared.url,
-					currentPageHtml: currentDocumentHtml,
+					currentPageHtml: sourceDocumentHtml,
 					pageSnapshots,
 					seenSourceUrls,
 					onProgress: (chunkCompleted, _total, page) => updateDocumentBundleProgress({
@@ -2124,7 +2253,6 @@ async function handleDocumentBundle(): Promise<void> {
 						detail: page.title,
 					}),
 				});
-				for (const page of pages) acceptedPageIds.add(page.docname);
 				const output = buildDocumentBundleOutput({ manifest, pages, basePath });
 				const notes: DocumentCollectionNoteRequest[] = output.notes
 					.filter(note => !note.path.endsWith('/00 - Documentation index.md'))
@@ -2133,50 +2261,64 @@ async function handleDocumentBundle(): Promise<void> {
 						pageId: note.pageId || note.path,
 						contentHash: documentContentHash(note.content),
 					}));
-				for (const batch of documentCollectionBatches(notes)) {
-					collection = await bundleClient.client.writeDocumentCollectionBatch(collectionId, { notes: batch });
+				for (const batch of createDocumentCollectionBatches(notes)) {
+					collection = await writeDocumentCollectionBatchConfirmed(
+						bundleClient.client,
+						collectionId,
+						{ notes: batch }
+					);
 				}
 			}
-			const effectiveManifest = {
-				...manifest,
-				pages: manifest.pages.filter(page => acceptedPageIds.has(page.docname)),
-			};
-			collection = await bundleClient.client.createDocumentCollection({
-				collectionId,
-				title: manifest.title,
-				rootUrl: manifest.rootUrl,
-				locale: manifest.locale || 'und',
-				totalPages: effectiveManifest.pages.length,
-			});
-			const indexPages = effectiveManifest.pages.map(page => ({
+
+			collection = await bundleClient.client.getDocumentCollectionStatus(collectionId);
+			const expectedPageIds = manifest.pages.map(page => page.docname);
+			const missingPageIds = expectedPageIds.filter(pageId => !collection.notePaths[pageId]);
+			if (missingPageIds.length > 0) {
+				throw new Error(
+					`文档集合尚未完整保存（缺少 ${missingPageIds.length} 篇），不会打开 Obsidian`
+				);
+			}
+
+			const indexPages = manifest.pages.map(page => ({
 				...page,
 				noteName: page.title,
 				content: '',
 			}));
 			const indexOutput = buildDocumentBundleOutput({
-				manifest: effectiveManifest,
+				manifest,
 				pages: indexPages,
 				basePath,
 				collectedAt: new Date(),
 				pathOverrides: collection.notePaths,
 			});
 			const indexNote = indexOutput.notes.find(note => note.path.endsWith('/00 - Documentation index.md'))!;
-			await bundleClient.client.writeDocumentCollectionBatch(collectionId, {
-				notes: [{
-					...indexNote,
-					pageId: '__index__',
-					contentHash: documentContentHash(indexNote.content),
-				}],
-			});
-			await bundleClient.client.completeDocumentCollection(collectionId, {
-				expectedPageIds: effectiveManifest.pages.map(page => page.docname),
-			});
-			savedNoteCount = effectiveManifest.pages.length + 1;
+			const indexRequest: DocumentCollectionNoteRequest = {
+				...indexNote,
+				pageId: '__index__',
+				contentHash: documentContentHash(indexNote.content),
+			};
+			for (const batch of createDocumentCollectionBatches([indexRequest])) {
+				collection = await writeDocumentCollectionBatchConfirmed(
+					bundleClient.client,
+					collectionId,
+					{ notes: batch }
+				);
+			}
+			collection = await completeDocumentCollectionConfirmed(
+				bundleClient.client,
+				collectionId,
+				expectedPageIds
+			);
+			if (!collection.completed || !collection.notePaths.__index__) {
+				throw new Error('文档集合尚未完成最终确认，不会打开 Obsidian');
+			}
+			savedIndexPath = collection.notePaths.__index__;
+			savedNoteCount = manifest.pages.length + 1;
 		} else if (bundleClient) {
 			const pages = await collectDocumentPages({
 				manifest, template, propertyTypes, documentParser, fetchText: fetchDocumentationText,
 				currentPageUrl: prepared.url,
-				currentPageHtml: currentDocumentHtml,
+				currentPageHtml: sourceDocumentHtml,
 				pageSnapshots,
 			});
 			const output = buildDocumentBundleOutput({ manifest, pages, basePath, collectedAt: new Date() });
@@ -2184,12 +2326,13 @@ async function handleDocumentBundle(): Promise<void> {
 				behavior: 'overwrite',
 				notes: output.notes,
 			});
+			savedIndexPath = output.notes.find(note => note.path.endsWith('/00 - Documentation index.md'))?.path || null;
 			savedNoteCount = output.notes.length;
 		} else {
 			const pages = await collectDocumentPages({
 				manifest, template, propertyTypes, documentParser, fetchText: fetchDocumentationText,
 				currentPageUrl: prepared.url,
-				currentPageHtml: currentDocumentHtml,
+				currentPageHtml: sourceDocumentHtml,
 				pageSnapshots,
 			});
 			const output = buildDocumentBundleOutput({ manifest, pages, basePath, collectedAt: new Date() });
@@ -2219,6 +2362,9 @@ async function handleDocumentBundle(): Promise<void> {
 				: getMessage('documentationSavedMerged'),
 			completedState: true,
 		});
+		if (bundleClient && savedIndexPath) {
+			openObsidianNote(savedIndexPath, selectedVault || bundleClient.vaultName || '');
+		}
 	} catch (error) {
 		console.error('Failed to clip documentation:', error);
 		const message = error instanceof Error
