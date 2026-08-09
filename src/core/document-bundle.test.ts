@@ -18,6 +18,7 @@ import {
 	discoverDocumentation,
 	isLikelySphinxDocumentationHtml,
 	normalizeDocumentationBody,
+	normalizeDocumentationMarkdown,
 	normalizeMergedPageBody,
 	parseLlmsTxt,
 	parseDocumentationNavigation,
@@ -85,6 +86,13 @@ describe('documentation source detection', () => {
 		['Docsify', 'https://docs.example.com/#/', '<script>window.$docsify={loadSidebar:true}</script><aside class="docsify-sidebar"><div class="sidebar-nav"><a href="#/guide">Guide</a></div></aside>'],
 	])('detects %s through generic framework markers', (_name, url, html) => {
 		expect(detectDocumentSourceKind(url, html)).toBe('sidebar-html');
+	});
+
+	test('does not treat an X status page navigation as a documentation sidebar', () => {
+		expect(detectDocumentSourceKind(
+			'https://x.com/hank_aibtc/status/2085940050160914641',
+			'<main><nav role="navigation"><a href="/home">Home</a><a href="/explore">Explore</a></nav><article data-testid="tweet"><div data-testid="tweetText">Post text</div></article></main>'
+		)).toBeNull();
 	});
 });
 
@@ -1088,6 +1096,70 @@ describe('documentation Markdown cleanup', () => {
 		expect(cleaned).toContain('```\n\n[Next](https://example.com/next)');
 		expect(cleaned).toContain('  - child');
 	});
+
+	test('converts Mintlify MDX cards, accordions, tabs and callouts into readable Markdown', () => {
+		const cleaned = normalizeDocumentationMarkdown(
+			`> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.bigmodel.cn/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Embedding-3
+
+<CardGroup cols={3}>
+  <Card title="输入模态" icon={<svg style={{WebkitMaskImage: "url(https://mintcdn.com/icon.svg)"}} className={"h-6"} />}>
+    文本
+  </Card>
+  <Card title="接口文档" href="/api-reference/embedding">
+    API 调用方式
+  </Card>
+  <Card
+    title="多行卡片"
+    icon={
+      <svg
+        style={{ WebkitMaskImage: "url(https://mintcdn.com/multiline.svg)" }}
+        className={"h-6"}
+      />
+    }
+  >
+    多行属性也应正常转换
+  </Card>
+</CardGroup>
+
+## <div className="flex"><svg style={{WebkitMaskImage: "url(icon.svg)"}} className={"h-6"} /> 调用示例</div>
+
+<AccordionGroup>
+  <Accordion title="高精度语义搜索" defaultOpen>
+    更精准的文档检索。
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+请妥善保存 API Key。
+</Tip>
+
+<Tabs>
+  <Tab title="cURL">
+\`\`\`bash
+curl https://example.com
+\`\`\`
+  </Tab>
+</Tabs>`,
+			'https://docs.bigmodel.cn/cn/guide/models/embedding/embedding-3.md'
+		);
+
+		expect(cleaned).toContain('### 输入模态');
+		expect(cleaned).toContain('文本');
+		expect(cleaned).toContain('### [接口文档](https://docs.bigmodel.cn/api-reference/embedding)');
+		expect(cleaned).toContain('### 多行卡片');
+		expect(cleaned).toContain('## 调用示例');
+		expect(cleaned).toContain('### 高精度语义搜索');
+		expect(cleaned).toContain('> [!TIP]');
+		expect(cleaned).toContain('> 请妥善保存 API Key。');
+		expect(cleaned).toContain('#### cURL');
+		expect(cleaned).toContain('```bash\ncurl https://example.com\n```');
+		expect(cleaned).not.toMatch(/WebkitMaskImage|className=|<\/?(?:Card|Accordion|Tabs?)/);
+		expect(cleaned).not.toContain('\n}\n');
+	});
 });
 
 describe('collectDocumentPages', () => {
@@ -1140,6 +1212,20 @@ describe('collectDocumentPages', () => {
 		expect(callout?.textContent).toContain('请妥善保存密钥。');
 		expect(document.body.textContent).not.toContain('上一篇说明');
 		expect(document.body.textContent).not.toContain('下一篇说明');
+	});
+
+	test('removes runtime payloads before HTML is passed to the Markdown converter', () => {
+		const prepared = preserveDocumentationCardGrids(
+			`<html><head><style>.card { display: grid }</style><script>const source = '</Card> WebkitMaskImage className={"h-6"}';</script></head>
+			<body><main><h1>嵌入模型</h1><p>正文内容。</p><noscript>fallback JSX</noscript><template><p>hydration payload</p></template></main></body></html>`,
+			'https://docs.bigmodel.cn/cn/guide/models/embedding',
+			{ parseFromString: source => parseHTML(source).document }
+		);
+		const document = parseHTML(prepared).document;
+		expect(document.querySelector('script, style, noscript, template')).toBeNull();
+		expect(document.body.textContent).toContain('正文内容。');
+		expect(document.body.textContent).not.toContain('WebkitMaskImage');
+		expect(document.body.textContent).not.toContain('hydration payload');
 	});
 
 	test('normalizes documentation titles, boilerplate, relative links and duplicate redirects', async () => {

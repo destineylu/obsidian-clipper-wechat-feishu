@@ -116,6 +116,12 @@ export function detectDocumentSourceKind(
 		return null;
 	}
 	if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+	// X's application shell exposes its primary navigation with generic
+	// sidebar/navigation markers. Those are site chrome, not documentation.
+	if (
+		/^(?:www\.|mobile\.)?(?:x|twitter)\.com$/i.test(url.hostname) &&
+		/^\/[^/]+\/status\/\d+(?:\/|$)/i.test(url.pathname)
+	) return null;
 	if (isLikelySphinxDocumentationHtml(html)) return 'sphinx';
 	if (
 		url.hostname === 'platform.claude.com' &&
@@ -2134,11 +2140,179 @@ function normalizeDocumentNoteContent(content: string, title: string): string {
 
 const DOCUMENTATION_INDEX_NOTICE = /^\s*>\s*##\s*Documentation Index\s*\n(?:>[^\n]*\n){1,4}\s*/i;
 
+const DOCUMENTATION_MDX_CALLOUTS: Record<string, string> = {
+	Tip: 'TIP',
+	Warning: 'WARNING',
+	Note: 'NOTE',
+	Info: 'INFO',
+	Check: 'SUCCESS',
+	Danger: 'DANGER',
+};
+
+function mdxAttribute(source: string, name: string): string {
+	const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const match = source.match(new RegExp(
+		`${escapedName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|\\{\\s*\`([^\`]*)\`\\s*\\}|\\{\\s*"([^"]*)"\\s*\\})`,
+		'i'
+	));
+	return plainTitle(match?.slice(1).find(value => value !== undefined) || '', '');
+}
+
+function mdxHeading(title: string, href: string, sourceUrl: string, level: number): string {
+	const safeTitle = title || 'Section';
+	if (!href) return `${'#'.repeat(level)} ${safeTitle}`;
+	try {
+		const target = new URL(href, sourceUrl);
+		if (target.protocol === 'http:' || target.protocol === 'https:') {
+			return `${'#'.repeat(level)} [${safeTitle}](${target.toString()})`;
+		}
+	} catch { /* keep the title without a link */ }
+	return `${'#'.repeat(level)} ${safeTitle}`;
+}
+
+function collapseDocumentationMdxOpenings(markdown: string): string {
+	const lines = markdown.split('\n');
+	const collapsed: string[] = [];
+	let fence: { marker: string; length: number } | null = null;
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		const trimmed = line.trim();
+		const fenceMatch = trimmed.match(/^(`{3,}|~{3,})(.*)$/);
+		if (fenceMatch) {
+			const marker = fenceMatch[1][0];
+			if (!fence) fence = { marker, length: fenceMatch[1].length };
+			else if (
+				fence.marker === marker &&
+				fenceMatch[1].length >= fence.length &&
+				!fenceMatch[2].trim()
+			) fence = null;
+			collapsed.push(line);
+			continue;
+		}
+		if (fence || !/^<(?:Card|Accordion|Step|Tab|Expandable|ParamField|ResponseField)\b[^>]*$/i.test(trimmed)) {
+			collapsed.push(line);
+			continue;
+		}
+
+		const opening = [trimmed];
+		let nestedElementDepth = 0;
+		while (index + 1 < lines.length) {
+			const next = lines[++index].trim();
+			opening.push(next);
+			if (/^<[A-Za-z][A-Za-z0-9:.-]*\b[^>]*$/.test(next)) {
+				nestedElementDepth += 1;
+				continue;
+			}
+			if (next === '/>') {
+				if (nestedElementDepth > 0) nestedElementDepth -= 1;
+				else break;
+				continue;
+			}
+			if (next === '>' && nestedElementDepth === 0) break;
+		}
+		collapsed.push(`${line.match(/^\s*/)?.[0] || ''}${opening.join(' ')}`);
+	}
+	return collapsed.join('\n');
+}
+
+function normalizeMdxInlineHtml(line: string): string {
+	return line
+		.replace(/<svg\b[\s\S]*?<\/svg\s*>/gi, '')
+		.replace(/<svg\b[\s\S]*?\/>/gi, '')
+		.replace(/\s+className=(?:"[^"]*"|'[^']*'|\{\s*["'][^"']*["']\s*\})/g, '')
+		.replace(/\s+style=\{\{[^}]*\}\}/g, '')
+		.replace(/<\/?(?:div|span)\b[^>]*>/gi, '')
+		.replace(/^(#{1,6})\s{2,}/, '$1 ');
+}
+
+function normalizeDocumentationMdx(markdown: string, sourceUrl: string): string {
+	const output: string[] = [];
+	let fence: { marker: string; length: number } | null = null;
+	let calloutTag = '';
+	const collapsedMarkdown = collapseDocumentationMdxOpenings(markdown);
+
+	const append = (line: string) => {
+		output.push(calloutTag ? (line ? `> ${line}` : '>') : line);
+	};
+
+	for (const rawLine of collapsedMarkdown.split('\n')) {
+		const trimmed = rawLine.trim();
+		const fenceMatch = trimmed.match(/^(`{3,}|~{3,})(.*)$/);
+		if (fenceMatch) {
+			const marker = fenceMatch[1][0];
+			if (!fence) fence = { marker, length: fenceMatch[1].length };
+			else if (
+				fence.marker === marker &&
+				fenceMatch[1].length >= fence.length &&
+				!fenceMatch[2].trim()
+			) fence = null;
+			append(rawLine);
+			continue;
+		}
+		if (fence) {
+			append(rawLine);
+			continue;
+		}
+
+		const calloutClose = trimmed.match(/^<\/(Tip|Warning|Note|Info|Check|Danger)>$/);
+		if (calloutClose) {
+			calloutTag = '';
+			output.push('');
+			continue;
+		}
+		const calloutOpen = trimmed.match(/^<(Tip|Warning|Note|Info|Check|Danger)\b([^>]*)>$/);
+		if (calloutOpen) {
+			calloutTag = calloutOpen[1];
+			const title = mdxAttribute(calloutOpen[2], 'title');
+			output.push(`> [!${DOCUMENTATION_MDX_CALLOUTS[calloutTag]}]${title ? ` ${title}` : ''}`);
+			continue;
+		}
+
+		if (/^<\/?(?:CardGroup|AccordionGroup|Steps|Tabs|CodeGroup)\b[^>]*>$/i.test(trimmed)) {
+			continue;
+		}
+		if (/^<\/(?:Card|Accordion|Step|Tab|Expandable|ParamField|ResponseField)>$/i.test(trimmed)) {
+			append('');
+			continue;
+		}
+
+		const componentOpen = trimmed.match(
+			/^<(Card|Accordion|Step|Tab|Expandable|ParamField|ResponseField)\b([\s\S]*)>$/
+		);
+		if (componentOpen) {
+			const [, component, attributes] = componentOpen;
+			const label = mdxAttribute(attributes, 'title') ||
+				mdxAttribute(attributes, 'path') ||
+				mdxAttribute(attributes, 'name') ||
+				component;
+			const href = mdxAttribute(attributes, 'href');
+			const type = mdxAttribute(attributes, 'type');
+			const headingLevel = component === 'Tab' ? 4 : 3;
+			const heading = mdxHeading(label, href, sourceUrl, headingLevel);
+			append(type ? `${heading} \`${type}\`` : heading);
+			continue;
+		}
+
+		// Unknown display components should not leak JSX into the note. Preserve
+		// their child Markdown while removing line-only wrappers and inline tags.
+		if (/^<\/?[A-Z][A-Za-z0-9.]*\b[\s\S]*>\s*$/.test(trimmed)) {
+			continue;
+		}
+		const withoutInlineComponents = normalizeMdxInlineHtml(rawLine)
+			.replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+			.replace(/<\/?[A-Z][A-Za-z0-9.]*(?:\s+[^<>]*?)?\s*\/?>/g, '');
+		append(withoutInlineComponents);
+	}
+
+	return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 export function normalizeDocumentationMarkdown(markdown: string, sourceUrl: string): string {
 	const withoutNotice = markdown.replace(/\r\n?/g, '\n').replace(DOCUMENTATION_INDEX_NOTICE, '');
+	const normalizedMdx = normalizeDocumentationMdx(withoutNotice, sourceUrl);
 	let inFence = false;
-	return withoutNotice.split('\n').map(line => {
-		if (/^\s*(`{3,}|~{3,})/.test(line)) {
+	return normalizedMdx.split('\n').map(line => {
+		if (/^\s*(?:>\s*)?(`{3,}|~{3,})/.test(line)) {
 			inFence = !inFence;
 			return line;
 		}
@@ -2233,6 +2407,13 @@ export function preserveDocumentationCardGrids(
 	documentParser: DocumentParser
 ): string {
 	const document = documentParser.parseFromString(html, 'text/html') as Document;
+	// The single-page clipping path removes executable/non-content nodes before
+	// Defuddle runs. Collection pages must apply the same boundary: many docs
+	// sites ship React/RSC payloads, CSS, and hydration data inside the HTML;
+	// linkedom/DOMParser can otherwise expose that source text as article content.
+	for (const element of Array.from(document.querySelectorAll('script, style, noscript, template'))) {
+		element.remove();
+	}
 	removeDocumentationNavigationChrome(document, pageUrl);
 	convertDocumentationCallouts(document);
 	const containers = Array.from(document.querySelectorAll(
